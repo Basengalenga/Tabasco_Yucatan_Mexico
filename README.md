@@ -46,6 +46,23 @@ Reglas de bronze:
 - Por ahora cada ejecución reemplaza la tabla completa (decisión temporal
   mientras se define la estrategia de re-ejecuciones).
 
+## Hallazgo: puntos DENUE fuera de los polígonos municipales
+
+Se cruzaron los 809,101 puntos de `bronze.denue` (todas las ediciones) contra
+los polígonos de `bronze.marco_geo_municipal` con PostGIS (`ST_Intersects` para
+detectar los que caen fuera y `ST_Distance` para medir al polígono más cercano,
+en EPSG:6372). Solo 52 puntos quedan fuera:
+
+| Grupo | Puntos | Distancia al polígono más cercano |
+| --- | --- | --- |
+| Borde | 7 | 2 a 25 m |
+| Coordenada basura (10.258, -124.445, en el Pacífico) | 43 | ~3,600 km |
+| Fuera del estado (Puebla y Sinaloa) | 2 | > 1,000 km |
+
+**Decisión:** umbral de **30 m**, es decir, 5 m de margen sobre el punto de borde
+más alejado (25 m). En silver, los puntos a 30 m o menos se asignan al municipio
+más cercano y los demás se descartan.
+
 ## Cómo levantarlo
 
 1. Levantar la base de datos (PostGIS en `localhost:5432`, base `yucatan_dw`,

@@ -8,6 +8,7 @@ carga a su propia tabla dentro del esquema `bronze`:
     bronze.iter_2020             <- INEGI ITER 2020, Yucatán
     bronze.denue                 <- INEGI DENUE, ediciones 2020-2025
     bronze.marco_geo_municipal   <- INEGI Marco Geoestadístico, municipios
+    bronze.scian                 <- INEGI catálogo SCIAN 2018 y 2023
 
 Reglas de bronze:
     - Todas las columnas de la fuente se guardan como TEXT.
@@ -59,6 +60,14 @@ EDICIONES_DENUE = {
     "2024_11": f"{BASE_DENUE}/2024_11/denue_31_1124_csv.zip",
     "2025_05": f"{BASE_DENUE}/2025_05/denue_31_0525_csv.zip",
 }
+
+# El DENUE usa SCIAN 2018 (ediciones 2020-2023) y SCIAN 2023 (2024 en adelante)
+BASE_SCIAN = "https://www.inegi.org.mx/contenidos/app/scian"
+URLS_SCIAN = {
+    "SCIAN 2018": f"{BASE_SCIAN}/scian_2018_categorias_y_productos.xlsx",
+    "SCIAN 2023": f"{BASE_SCIAN}/scian_2023_categorias_y_productos.xlsx",
+}
+HOJAS_SCIAN = ["SECTOR", "SUBSECTOR", "RAMA", "SUBRAMA", "CLASE"]
 
 
 # --------------------------------------------------------------------------
@@ -200,6 +209,33 @@ def extraer_cargar_marco_geo(engine, run_id: str, ingested_at: datetime) -> None
     cargar_tabla(mun, "marco_geo_municipal", engine)
 
 
+def extraer_cargar_scian(engine, run_id: str, ingested_at: datetime) -> None:
+    """Catálogo SCIAN (INEGI), versiones 2018 y 2023, una hoja de Excel por nivel.
+
+    Se guardan todas las hojas de nivel tal como vienen, con dos columnas extra:
+    HOJA (nivel) y SCIAN (versión). Solo se quitan los renglones completamente
+    vacíos que deja el formato del Excel. La hoja CLASE incluye renglones del
+    índice de productos sin código; se conservan (silver los filtra).
+    """
+    dfs = []
+    for version, url in URLS_SCIAN.items():
+        r = requests.get(url, timeout=300)
+        r.raise_for_status()
+        for hoja in HOJAS_SCIAN:
+            # La fila 0 es el título del documento; los encabezados están en la fila 1
+            df = pd.read_excel(io.BytesIO(r.content), sheet_name=hoja, header=1, dtype=str)
+            df = df.dropna(how="all")
+            df["HOJA"] = hoja
+            df["SCIAN"] = version
+            df = normalizar_columnas(df)
+            df = agregar_metadatos(df, url, run_id, ingested_at)
+            dfs.append(df)
+        print(f"     scian {version}: descargado")
+
+    scian = pd.concat(dfs, ignore_index=True)
+    cargar_tabla(scian, "scian", engine)
+
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -214,6 +250,7 @@ def main() -> None:
     extraer_cargar_iter(engine, run_id, ingested_at)
     extraer_cargar_denue(engine, run_id, ingested_at)
     extraer_cargar_marco_geo(engine, run_id, ingested_at)
+    extraer_cargar_scian(engine, run_id, ingested_at)
 
     print("Carga a bronze completada.")
 
