@@ -17,15 +17,29 @@ services:
       timeout: 5s
       retries: 10
 
+  api:
+    build: ./api
+    container_name: yucatan_api
+    environment:
+      DB_URL: postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   dashboard:
     build: ./dashboard
     container_name: yucatan_dashboard
     environment:
-      DB_URL: postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw
+      API_URL: http://api:8000
     ports:
       - "8501:8501"
     depends_on:
-      db:
+      api:
         condition: service_healthy
 
 volumes:

@@ -1,28 +1,26 @@
 """
 Dashboard de yucatan_dw (Streamlit).
 
-Lee SOLO de la capa gold: vistas kpi_municipio_anio y cociente_localizacion,
-hechos y dimensiones, y las tablas resultado_* de src/gold_analytics.py.
+Lee SOLO de la capa gold a través de la API (api/main.py): vistas kpi_municipio_anio y
+cociente_localizacion, hechos y dimensiones, y las tablas resultado_* de src/gold_analytics.py.
 
-Correr local:   streamlit run dashboard/main.py
+Correr local:   streamlit run dashboard/main.py   (con la API corriendo en API_URL, por defecto localhost:8000)
 Correr Docker:  docker compose up -d  ->  http://localhost:8501
 """
 
-import json
 import os
-from decimal import Decimal
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import streamlit as st
-from sqlalchemy import create_engine
 
 # --------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------
-DB_URL = os.environ.get("DB_URL", "postgresql+psycopg2://admin:admin123@localhost:5432/yucatan_dw")
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
 ANIOS = list(range(2020, 2026))
 
 # Paleta (series categóricas en orden fijo, rampa secuencial azul, divergente azul <-> rojo)
@@ -80,58 +78,31 @@ st.markdown("""
 # --------------------------------------------------------------------------
 # Datos (todo desde gold)
 # --------------------------------------------------------------------------
-@st.cache_resource
-def motor():
-    return create_engine(DB_URL)
-
-
 @st.cache_data(ttl=600)
-def consulta(sql: str) -> pd.DataFrame:
-    df = pd.read_sql(sql, motor())
-    # Las columnas NUMERIC de PostgreSQL llegan como Decimal; se pasan a float
-    for c in df.columns:
-        if df[c].map(lambda v: isinstance(v, Decimal)).any():
-            df[c] = df[c].astype(float)
-    if "cvegeo" in df.columns:
-        df["cvegeo"] = df["cvegeo"].str.strip()
-    return df
+def api(ruta: str):
+    r = requests.get(f"{API_URL}{ruta}", timeout=60)
+    r.raise_for_status()
+    return r.json()
 
 
-@st.cache_data(ttl=600)
+def consulta(ruta: str) -> pd.DataFrame:
+    return pd.DataFrame(api(ruta))
+
+
 def geojson() -> dict:
-    df = consulta("""
-        SELECT cvegeo, nombre,
-               ST_AsGeoJSON(ST_Transform(ST_SimplifyPreserveTopology(geom, 100), 4326), 5) AS g
-        FROM gold.dim_municipio
-    """)
-    return {
-        "type": "FeatureCollection",
-        "features": [
-            {"type": "Feature", "properties": {"cvegeo": r.cvegeo, "nombre": r.nombre}, "geometry": json.loads(r.g)}
-            for r in df.itertuples()
-        ],
-    }
+    return api("/municipios/geojson")
 
 
 def kpi() -> pd.DataFrame:
-    columnas = ", ".join(["anio", "cvegeo", "nombre", "sector_dominante", "desc_sector_dominante", *INDICADORES])
-    return consulta(f"SELECT {columnas} FROM gold.kpi_municipio_anio")
+    return consulta("/kpi")
 
 
 def incidencia_mensual() -> pd.DataFrame:
-    return consulta("""
-        SELECT t.id_tiempo, t.anio, t.mes, t.nombre_mes, d.bien_juridico, d.tipo_delito, i.cvegeo,
-               sum(i.incidentes) AS incidentes
-        FROM gold.fact_incidencia i
-        JOIN gold.dim_tiempo t USING (id_tiempo)
-        JOIN gold.dim_delito d USING (id_delito)
-        WHERE i.incidentes > 0
-        GROUP BY 1, 2, 3, 4, 5, 6, 7
-    """)
+    return consulta("/incidencia-mensual")
 
 
 def lq() -> pd.DataFrame:
-    return consulta("SELECT * FROM gold.cociente_localizacion")
+    return consulta("/cociente-localizacion")
 
 
 # --------------------------------------------------------------------------
@@ -493,10 +464,10 @@ with tabs[4]:
 # 6. Análisis espacial
 # --------------------------------------------------------------------------
 with tabs[5]:
-    correlacion = consulta("SELECT * FROM gold.resultado_correlacion")
-    moran = consulta("SELECT * FROM gold.resultado_moran_global")
-    bivariado = consulta("SELECT * FROM gold.resultado_moran_bivariado")
-    resultado_lisa = consulta("SELECT * FROM gold.resultado_lisa")
+    correlacion = consulta("/resultados/correlacion")
+    moran = consulta("/resultados/moran-global")
+    bivariado = consulta("/resultados/moran-bivariado")
+    resultado_lisa = consulta("/resultados/lisa")
 
     st.markdown("Pesos Queen desde `gold.vecinos_municipio`, estandarizados por fila · 999 permutaciones · α = 0.05")
 
@@ -607,9 +578,6 @@ with tabs[6]:
     )
 
     st.subheader("Última carga de gold")
-    log = consulta("""
-        SELECT tabla, metrica, valor, fecha_carga FROM gold.etl_log
-        WHERE run_id IN (SELECT run_id FROM gold.etl_log GROUP BY run_id ORDER BY max(fecha_carga) DESC LIMIT 2)
-        ORDER BY fecha_carga, id
-    """)
+    log = consulta("/etl-log")
+    log["fecha_carga"] = pd.to_datetime(log["fecha_carga"])
     st.dataframe(log, hide_index=True, width="stretch")

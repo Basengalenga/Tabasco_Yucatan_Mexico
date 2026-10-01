@@ -5,16 +5,16 @@ Data warehouse de Yucatán (`yucatan_dw`) construido con la arquitectura medalli
 
 ## Para Gio: estado actual y lo que falta
 
-**Estamos en la capa gold.** Bronze y silver ya están cargadas; el código de gold
-(carga y análisis espacial) está escrito y falta ejecutarlo.
+**Falta la orquestación.** Bronze, silver y gold (carga y análisis espacial) ya
+están cargadas, y la API y el dashboard ya leen de gold.
 
 | Fase | Estado |
 | --- | --- |
 | Capa bronze | ✅ Lista |
 | Capa silver | ✅ Lista |
-| Capa gold | 🛠️ Código listo, falta ejecutar |
-| API para acceder al warehouse (FastAPI) | ⏳ Pendiente |
-| Dashboards (Metabase o Apache Superset, por decidir) | ⏳ Pendiente |
+| Capa gold | ✅ Lista |
+| API para acceder al warehouse (FastAPI) | ✅ Lista |
+| Dashboard (Streamlit, lee de la API) | ✅ Listo |
 | Orquestación | ⏳ Pendiente |
 
 Sobre la orquestación: si da tiempo, ver si jala Airflow. Si no da chance, basta
@@ -146,8 +146,8 @@ Ver [`hallazgos.md`](hallazgos.md).
 
 ## Cómo levantarlo
 
-1. Levantar la base de datos (PostGIS en `localhost:5432`, base `yucatan_dw`,
-   usuario `admin` / `admin123`):
+1. Levantar los contenedores: la base de datos (PostGIS en `localhost:5432`,
+   base `yucatan_dw`, usuario `admin` / `admin123`), la API y el dashboard:
 
    ```bash
    docker compose up -d
@@ -168,6 +168,40 @@ Ver [`hallazgos.md`](hallazgos.md).
    python src/gold_analytics.py        # gold -> gold.resultado_* (análisis espacial)
    ```
 
+4. Abrir el dashboard en http://localhost:8501 (necesita gold ya cargada).
+
+### API y dashboard
+
+El dashboard no se conecta a PostgreSQL: pide los datos de gold a la API
+(`api/main.py`, FastAPI), y la API es la única que consulta la base.
+
+| Endpoint | Devuelve |
+| --- | --- |
+| `GET /health` | Estado de la API (lo usa el healthcheck de Docker) |
+| `GET /municipios/geojson` | Polígonos de los municipios (FeatureCollection, EPSG:4326) |
+| `GET /kpi` | `gold.kpi_municipio_anio` |
+| `GET /incidencia-mensual` | Incidentes por mes, municipio y tipo de delito |
+| `GET /cociente-localizacion` | `gold.cociente_localizacion` |
+| `GET /resultados/correlacion` | `gold.resultado_correlacion` |
+| `GET /resultados/moran-global` | `gold.resultado_moran_global` |
+| `GET /resultados/moran-bivariado` | `gold.resultado_moran_bivariado` |
+| `GET /resultados/lisa` | `gold.resultado_lisa` |
+| `GET /etl-log` | Las dos últimas corridas de `gold.etl_log` |
+
+En Docker la API solo es accesible dentro de la red de los contenedores
+(`http://api:8000`); no expone puerto al host. Para correr la API y el
+dashboard fuera de Docker (con la base levantada):
+
+```bash
+cd api && pip install -r requirements.txt && uvicorn main:app --port 8000
+# en otra terminal
+cd dashboard && pip install -r requirements.txt && streamlit run main.py
+```
+
+Con la API corriendo en local, su documentación interactiva está en
+http://localhost:8000/docs. El dashboard usa `API_URL` (por defecto
+`http://localhost:8000`) y la API usa `DB_URL`.
+
 ## Estructura
 
 ```
@@ -178,6 +212,8 @@ src/gold_analytics.py         # correlaciones, Moran, LISA -> gold.resultado_*
 sql/init.sql                  # extensión PostGIS, esquemas y DDL de todas las tablas
 sql/gold/gold.sql             # carga de gold y vistas (en subcarpeta: Docker no lo ejecuta)
 validaciones/silver.sql       # validaciones post-carga de silver
-docker-compose.yml            # contenedor de PostGIS
+api/                          # API FastAPI sobre gold (main.py, Dockerfile, requirements.txt)
+dashboard/                    # dashboard Streamlit que consume la API
+docker-compose.yml            # contenedores de PostGIS, API y dashboard
 requirements.txt              # dependencias de Python
 ```
