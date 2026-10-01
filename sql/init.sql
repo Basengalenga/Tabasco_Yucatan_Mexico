@@ -127,3 +127,154 @@ CREATE TABLE IF NOT EXISTS silver.etl_log (
     valor        BIGINT        NOT NULL,
     fecha_carga  TIMESTAMPTZ   NOT NULL
 );
+
+-- ==========================================================================
+-- Capa gold: modelo estrella y resultados del análisis espacial.
+-- Solo estructura; la carga la hacen src/silver_to_gold.py (sql/gold/gold.sql)
+-- y src/gold_analytics.py (tablas resultado_*). Las vistas viven en sql/gold/gold.sql.
+-- ==========================================================================
+
+-- Dimensión municipio
+CREATE TABLE IF NOT EXISTS gold.dim_municipio (
+    cvegeo    CHAR(5)                         PRIMARY KEY,
+    nombre    TEXT                            NOT NULL,
+    area_km2  DOUBLE PRECISION                NOT NULL,
+    geom      geometry(MultiPolygon, 6372)    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dim_municipio_geom_gist ON gold.dim_municipio USING GIST (geom);
+
+-- Dimensión tiempo, grano año-mes. id_tiempo = AAAAMM (p. ej. 202011).
+CREATE TABLE IF NOT EXISTS gold.dim_tiempo (
+    id_tiempo   INTEGER    PRIMARY KEY,
+    anio        SMALLINT   NOT NULL,
+    mes         SMALLINT   NOT NULL CHECK (mes BETWEEN 1 AND 12),
+    trimestre   SMALLINT   NOT NULL CHECK (trimestre BETWEEN 1 AND 4),
+    nombre_mes  TEXT       NOT NULL,
+    CHECK (id_tiempo = anio * 100 + mes)
+);
+
+-- Dimensión actividad: una fila por clase SCIAN + versión, con la jerarquía aplanada.
+-- Los sectores 31-33 y 48-49 son rangos, igual que en silver.
+CREATE TABLE IF NOT EXISTS gold.dim_actividad (
+    id_actividad      SERIAL       PRIMARY KEY,
+    codigo_clase      CHAR(6)      NOT NULL,
+    desc_clase        TEXT         NOT NULL,
+    version_scian     TEXT         NOT NULL,
+    codigo_rama       CHAR(4)      NOT NULL,
+    desc_rama         TEXT         NOT NULL,
+    codigo_subsector  CHAR(3)      NOT NULL,
+    desc_subsector    TEXT         NOT NULL,
+    codigo_sector     VARCHAR(5)   NOT NULL,
+    desc_sector       TEXT         NOT NULL,
+    es_retail         BOOLEAN      NOT NULL,  -- sector 46
+    es_servicio       BOOLEAN      NOT NULL,  -- sectores 51 a 81
+    UNIQUE (codigo_clase, version_scian)
+);
+
+-- Dimensión delito
+CREATE TABLE IF NOT EXISTS gold.dim_delito (
+    id_delito       SERIAL   PRIMARY KEY,
+    bien_juridico   TEXT     NOT NULL,
+    tipo_delito     TEXT     NOT NULL,
+    subtipo_delito  TEXT     NOT NULL,
+    modalidad       TEXT     NOT NULL,
+    UNIQUE (bien_juridico, tipo_delito, subtipo_delito, modalidad)
+);
+
+-- Hecho censo: grano municipio (Censo 2020)
+CREATE TABLE IF NOT EXISTS gold.fact_censo (
+    cvegeo     CHAR(5)   PRIMARY KEY REFERENCES gold.dim_municipio (cvegeo),
+    pobtot     INTEGER,
+    p_12ymas   INTEGER,
+    pea        INTEGER,
+    pe_inac    INTEGER,
+    pob0_14    INTEGER,
+    pob15_64   INTEGER,
+    pob65_mas  INTEGER,
+    vivtot     INTEGER,
+    tvivhab    INTEGER
+);
+
+-- Hecho establecimiento: grano establecimiento × edición DENUE.
+-- Snapshot periódico: NO se suma entre ediciones.
+CREATE TABLE IF NOT EXISTS gold.fact_establecimiento (
+    id_denue      BIGINT                   NOT NULL,
+    edicion       CHAR(7)                  NOT NULL,
+    cvegeo        CHAR(5)                  NOT NULL REFERENCES gold.dim_municipio (cvegeo),
+    id_actividad  INTEGER                  NOT NULL REFERENCES gold.dim_actividad (id_actividad),
+    id_tiempo     INTEGER                  NOT NULL REFERENCES gold.dim_tiempo (id_tiempo),  -- mes de la edición
+    per_ocu       TEXT,
+    geom          geometry(Point, 6372)    NOT NULL,
+    PRIMARY KEY (id_denue, edicion)
+);
+CREATE INDEX IF NOT EXISTS fact_establecimiento_geom_gist ON gold.fact_establecimiento USING GIST (geom);
+CREATE INDEX IF NOT EXISTS fact_establecimiento_cvegeo_idx ON gold.fact_establecimiento (cvegeo);
+
+-- Hecho incidencia: grano municipio × mes × delito
+CREATE TABLE IF NOT EXISTS gold.fact_incidencia (
+    cvegeo      CHAR(5)   NOT NULL REFERENCES gold.dim_municipio (cvegeo),
+    id_tiempo   INTEGER   NOT NULL REFERENCES gold.dim_tiempo (id_tiempo),
+    id_delito   INTEGER   NOT NULL REFERENCES gold.dim_delito (id_delito),
+    incidentes  INTEGER   NOT NULL CHECK (incidentes >= 0),
+    PRIMARY KEY (cvegeo, id_tiempo, id_delito)
+);
+
+-- Pares de municipios contiguos (contigüidad Queen, ST_Intersects; ver sql/gold/gold.sql). Cada par va en ambas direcciones.
+CREATE TABLE IF NOT EXISTS gold.vecinos_municipio (
+    cvegeo         CHAR(5)   NOT NULL REFERENCES gold.dim_municipio (cvegeo),
+    cvegeo_vecino  CHAR(5)   NOT NULL REFERENCES gold.dim_municipio (cvegeo),
+    PRIMARY KEY (cvegeo, cvegeo_vecino),
+    CHECK (cvegeo <> cvegeo_vecino)
+);
+
+-- Resultados del análisis (los llena src/gold_analytics.py)
+CREATE TABLE IF NOT EXISTS gold.resultado_correlacion (
+    anio         SMALLINT           NOT NULL,
+    variable_x   TEXT               NOT NULL,
+    variable_y   TEXT               NOT NULL,
+    metodo       TEXT               NOT NULL CHECK (metodo IN ('pearson', 'spearman')),
+    coeficiente  DOUBLE PRECISION,
+    p_value      DOUBLE PRECISION,
+    n            INTEGER            NOT NULL,
+    PRIMARY KEY (anio, variable_x, variable_y, metodo)
+);
+
+CREATE TABLE IF NOT EXISTS gold.resultado_moran_global (
+    anio         SMALLINT           NOT NULL,
+    indicador    TEXT               NOT NULL,
+    i            DOUBLE PRECISION   NOT NULL,
+    esperanza_i  DOUBLE PRECISION   NOT NULL,
+    z            DOUBLE PRECISION   NOT NULL,  -- z_sim (permutaciones)
+    p_sim        DOUBLE PRECISION   NOT NULL,
+    PRIMARY KEY (anio, indicador)
+);
+
+CREATE TABLE IF NOT EXISTS gold.resultado_lisa (
+    anio       SMALLINT           NOT NULL,
+    indicador  TEXT               NOT NULL,
+    cvegeo     CHAR(5)            NOT NULL,
+    ii         DOUBLE PRECISION   NOT NULL,
+    p_sim      DOUBLE PRECISION   NOT NULL,
+    cuadrante  TEXT               NOT NULL CHECK (cuadrante IN ('HH', 'LL', 'HL', 'LH', 'no significativo')),
+    PRIMARY KEY (anio, indicador, cvegeo)
+);
+
+CREATE TABLE IF NOT EXISTS gold.resultado_moran_bivariado (
+    anio        SMALLINT           NOT NULL,
+    variable_x  TEXT               NOT NULL,
+    variable_y  TEXT               NOT NULL,
+    i           DOUBLE PRECISION   NOT NULL,
+    z           DOUBLE PRECISION   NOT NULL,  -- z_sim (permutaciones)
+    p_sim       DOUBLE PRECISION   NOT NULL,
+    PRIMARY KEY (anio, variable_x, variable_y)
+);
+
+-- Bitácora del ETL de gold (conteos). No se trunca.
+CREATE TABLE IF NOT EXISTS gold.etl_log (
+    id           BIGSERIAL     PRIMARY KEY,
+    run_id       UUID          NOT NULL,
+    tabla        TEXT          NOT NULL,
+    metrica      TEXT          NOT NULL,
+    valor        BIGINT        NOT NULL,
+    fecha_carga  TIMESTAMPTZ   NOT NULL
+);

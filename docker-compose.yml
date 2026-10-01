@@ -17,5 +17,16 @@ services:
       timeout: 5s
       retries: 10
 
+  dashboard:
+    build: ./dashboard
+    container_name: yucatan_dashboard
+    environment:
+      DB_URL: postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw
+    ports:
+      - "8501:8501"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:

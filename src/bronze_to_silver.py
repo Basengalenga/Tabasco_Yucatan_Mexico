@@ -57,6 +57,12 @@ SRID_DENUE = 6365  # lat/long del DENUE: geográficas ITRF2008 (marco oficial de
 # 30 m = 25 m del punto de borde más alejado encontrado + 5 m de margen (ver README).
 UMBRAL_MAS_CERCANO_M = 30
 
+# DECISIÓN HUMANA: el Arrecife Alacranes (Progreso, ~120 km mar adentro) no es habitable y
+# se quita del polígono de Progreso (inflaba su área). Se quitan las partes cuyo centroide
+# cae en esta caja (lon/lat, EPSG:4326). Los demás cayos e islas se conservan (ver README).
+CVEGEO_PROGRESO = "31059"
+CAJA_ALACRANES = shapely.box(-89.85, 22.30, -89.55, 22.65)
+
 VALORES_NULOS_INEGI = {"*", "N/D"}
 
 COLUMNAS_CENSO = ["pobtot", "p_12ymas", "pea", "pe_inac", "pob0_14", "pob15_64", "pob65_mas", "vivtot", "tvivhab"]
@@ -163,6 +169,14 @@ def transformar_municipios(engine, fecha_carga: datetime, log: list) -> gpd.GeoD
     invalidas = int((~mun.geometry.is_valid).sum())
     log.append(("municipios", "geometrias_reparadas", invalidas))
     mun["geometry"] = mun.geometry.apply(a_multipolygon)
+
+    caja = gpd.GeoSeries([CAJA_ALACRANES], crs=4326).to_crs(SRID).iloc[0]
+    progreso = mun.index[mun["cvegeo"] == CVEGEO_PROGRESO][0]
+    partes = list(mun.at[progreso, "geometry"].geoms)
+    conservadas = [p for p in partes if not caja.contains(p.centroid)]
+    exigir(len(conservadas) < len(partes), "municipios: no se encontró el Arrecife Alacranes en Progreso")
+    mun.at[progreso, "geometry"] = MultiPolygon(conservadas)
+    log.append(("municipios", "partes_arrecife_alacranes_eliminadas", len(partes) - len(conservadas)))
 
     mun = mun.rename(columns={"nomgeo": "nombre_municipio", "geometry": "geom"}).set_geometry("geom")
     mun["area_km2"] = mun.geom.area / 1_000_000
