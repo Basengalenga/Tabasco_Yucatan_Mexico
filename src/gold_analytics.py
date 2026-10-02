@@ -30,7 +30,7 @@ from sqlalchemy import create_engine, text
 # --------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------
-DB_URL = "postgresql+psycopg2://admin:admin123@localhost:5432/yucatan_dw"
+DB_URL = "postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw"
 SCHEMA = "gold"
 
 ANIOS_PANEL = range(2020, 2026)

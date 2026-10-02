@@ -15,6 +15,8 @@ Reglas de bronze:
     - Nombres de columna normalizados a snake_case sin acentos.
     - Los datos se cargan tal como vienen (sin limpiar ni transformar).
     - Metadatos agregados: _ingested_at, _source_url, _run_id.
+      _ingested_at es el inicio del lote (igual para las 5 tablas), no la hora
+      en que se escribió cada tabla. En Airflow es el logical_date del DAG run.
 
 Manejo de errores (fail-fast):
     Si cualquier descarga o carga falla, se detiene todo el script con error.
@@ -42,7 +44,7 @@ from sqlalchemy.types import Text
 # --------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------
-DB_URL = "postgresql+psycopg2://admin:admin123@localhost:5432/yucatan_dw"
+DB_URL = "postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw"
 SCHEMA = "bronze"
 
 CLAVE_YUCATAN = "31"

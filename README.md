@@ -202,6 +202,24 @@ Con la API corriendo en local, su documentación interactiva está en
 http://localhost:8000/docs. El dashboard usa `API_URL` (por defecto
 `http://localhost:8000`) y la API usa `DB_URL`.
 
+### Airflow
+
+El contenedor `airflow` monta `./dags`, `./src` y `./sql` en `/opt/airflow/`
+como solo lectura (`:ro`). Airflow solo necesita leer esos archivos, así que
+`:ro` evita que el contenedor los modifique por accidente. Los cambios que
+hagas en tu máquina se ven al instante dentro del contenedor.
+
+## Para explorar y aprender
+
+Airflow corre aquí en modo `standalone`: un solo contenedor levanta el
+webserver, el scheduler y el triggerer juntos. Es cómodo para empezar, pero
+en despliegues reales esos componentes suelen vivir en contenedores separados.
+Queda pendiente investigar cómo se reparten: qué hace exactamente cada uno,
+cómo se coordinan a través de la base de metadatos (`airflow-db`), qué se
+gana al escalarlos por separado y qué cambia al pasar de `LocalExecutor` a
+`CeleryExecutor` o `KubernetesExecutor`. Un buen punto de partida es el
+`docker-compose.yaml` oficial de Airflow, que arma justo esa versión separada.
+
 ## Estructura
 
 ```

@@ -43,7 +43,7 @@ from sqlalchemy import create_engine, text
 # --------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------
-DB_URL = "postgresql+psycopg2://admin:admin123@localhost:5432/yucatan_dw"
+DB_URL = "postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw"
 SCHEMA = "silver"
 INIT_SQL = Path(__file__).resolve().parent.parent / "sql" / "init.sql"
 
