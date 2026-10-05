@@ -3,6 +3,8 @@
 -- Vive en sql/gold/ para que Docker NO lo corra al crear la base (el entrypoint solo
 -- ejecuta los archivos de primer nivel de /docker-entrypoint-initdb.d).
 -- Periodo de gold: 2020 a 2025.
+-- Trazabilidad de los hechos: fuente y version_fuente se copian de silver; fecha_carga y run_id
+-- los fija silver_to_gold.py con set_config('gold.fecha_carga' / 'gold.run_id') en la transacción.
 
 -- --------------------------------------------------------------------------
 -- Dimensiones
@@ -44,18 +46,27 @@ ORDER BY 1, 2, 3, 4;
 -- --------------------------------------------------------------------------
 -- Hechos
 -- --------------------------------------------------------------------------
-INSERT INTO gold.fact_censo (cvegeo, pobtot, p_12ymas, pea, pe_inac, pob0_14, pob15_64, pob65_mas, vivtot, tvivhab)
-SELECT cvegeo, pobtot, p_12ymas, pea, pe_inac, pob0_14, pob15_64, pob65_mas, vivtot, tvivhab
+INSERT INTO gold.fact_censo (cvegeo, pobtot, p_12ymas, pea, pe_inac, pob0_14, pob15_64, pob65_mas, vivtot, tvivhab,
+                             fuente, version_fuente, fecha_carga, run_id)
+SELECT cvegeo, pobtot, p_12ymas, pea, pe_inac, pob0_14, pob15_64, pob65_mas, vivtot, tvivhab,
+       fuente, version_fuente,
+       current_setting('gold.fecha_carga')::TIMESTAMPTZ, current_setting('gold.run_id')::UUID
 FROM silver.censo_municipal;
 
 -- id_tiempo = mes de la edición ('2020_11' -> 202011)
-INSERT INTO gold.fact_establecimiento (id_denue, edicion, cvegeo, id_actividad, id_tiempo, per_ocu, geom)
-SELECT d.id_denue, d.edicion, d.cvegeo, a.id_actividad, replace(d.edicion, '_', '')::INTEGER, d.per_ocu, d.geom
+INSERT INTO gold.fact_establecimiento (id_denue, edicion, cvegeo, id_actividad, id_tiempo, per_ocu, geom,
+                                       fuente, version_fuente, fecha_carga, run_id)
+SELECT d.id_denue, d.edicion, d.cvegeo, a.id_actividad, replace(d.edicion, '_', '')::INTEGER, d.per_ocu, d.geom,
+       d.fuente, d.version_fuente,
+       current_setting('gold.fecha_carga')::TIMESTAMPTZ, current_setting('gold.run_id')::UUID
 FROM silver.denue_establecimientos d
 JOIN gold.dim_actividad a ON a.codigo_clase = d.codigo_act AND a.version_scian = d.version_scian;
 
-INSERT INTO gold.fact_incidencia (cvegeo, id_tiempo, id_delito, incidentes)
-SELECT i.cvegeo, i.anio * 100 + i.mes, d.id_delito, i.incidentes
+INSERT INTO gold.fact_incidencia (cvegeo, id_tiempo, id_delito, incidentes,
+                                  fuente, version_fuente, fecha_carga, run_id)
+SELECT i.cvegeo, i.anio * 100 + i.mes, d.id_delito, i.incidentes,
+       i.fuente, i.version_fuente,
+       current_setting('gold.fecha_carga')::TIMESTAMPTZ, current_setting('gold.run_id')::UUID
 FROM silver.incidencia_delictiva i
 JOIN gold.dim_delito d USING (bien_juridico, tipo_delito, subtipo_delito, modalidad)
 WHERE i.anio BETWEEN 2020 AND 2025;

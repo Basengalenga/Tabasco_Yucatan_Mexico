@@ -192,7 +192,12 @@ CREATE TABLE IF NOT EXISTS gold.fact_censo (
     pob15_64   INTEGER,
     pob65_mas  INTEGER,
     vivtot     INTEGER,
-    tvivhab    INTEGER
+    tvivhab    INTEGER,
+    -- Trazabilidad: fuente y versión copiadas de silver; fecha_carga y run_id de la corrida de gold
+    fuente          TEXT          NOT NULL,
+    version_fuente  TEXT          NOT NULL,
+    fecha_carga     TIMESTAMPTZ   NOT NULL,
+    run_id          UUID          NOT NULL
 );
 
 -- Hecho establecimiento: grano establecimiento × edición DENUE.
@@ -205,6 +210,10 @@ CREATE TABLE IF NOT EXISTS gold.fact_establecimiento (
     id_tiempo     INTEGER                  NOT NULL REFERENCES gold.dim_tiempo (id_tiempo),  -- mes de la edición
     per_ocu       TEXT,
     geom          geometry(Point, 6372)    NOT NULL,
+    fuente          TEXT          NOT NULL,
+    version_fuente  TEXT          NOT NULL,
+    fecha_carga     TIMESTAMPTZ   NOT NULL,
+    run_id          UUID          NOT NULL,
     PRIMARY KEY (id_denue, edicion)
 );
 CREATE INDEX IF NOT EXISTS fact_establecimiento_geom_gist ON gold.fact_establecimiento USING GIST (geom);
@@ -216,6 +225,10 @@ CREATE TABLE IF NOT EXISTS gold.fact_incidencia (
     id_tiempo   INTEGER   NOT NULL REFERENCES gold.dim_tiempo (id_tiempo),
     id_delito   INTEGER   NOT NULL REFERENCES gold.dim_delito (id_delito),
     incidentes  INTEGER   NOT NULL CHECK (incidentes >= 0),
+    fuente          TEXT          NOT NULL,
+    version_fuente  TEXT          NOT NULL,
+    fecha_carga     TIMESTAMPTZ   NOT NULL,
+    run_id          UUID          NOT NULL,
     PRIMARY KEY (cvegeo, id_tiempo, id_delito)
 );
 

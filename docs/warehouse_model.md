@@ -62,6 +62,10 @@ erDiagram
         INTEGER pob65_mas
         INTEGER vivtot
         INTEGER tvivhab
+        TEXT fuente "lineage"
+        TEXT version_fuente "lineage"
+        TIMESTAMPTZ fecha_carga "lineage"
+        UUID run_id "lineage"
     }
     fact_establecimiento {
         BIGINT id_denue PK
@@ -71,12 +75,20 @@ erDiagram
         INTEGER id_tiempo FK
         TEXT per_ocu
         POINT_6372 geom
+        TEXT fuente "lineage"
+        TEXT version_fuente "lineage"
+        TIMESTAMPTZ fecha_carga "lineage"
+        UUID run_id "lineage"
     }
     fact_incidencia {
         CHAR5 cvegeo PK,FK
         INTEGER id_tiempo PK,FK
         INTEGER id_delito PK,FK
         INTEGER incidentes
+        TEXT fuente "lineage"
+        TEXT version_fuente "lineage"
+        TIMESTAMPTZ fecha_carga "lineage"
+        UUID run_id "lineage"
     }
     vecinos_municipio {
         CHAR5 cvegeo PK,FK

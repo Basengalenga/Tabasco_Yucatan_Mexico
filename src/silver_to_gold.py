@@ -7,6 +7,9 @@ valida el resultado contra silver y registra los conteos en gold.etl_log.
 
 Las tablas gold.resultado_* no se tocan aquí; las llena src/gold_analytics.py.
 
+Los hechos llevan columnas de trazabilidad: fuente y version_fuente (copiadas de
+silver), fecha_carga y run_id (de esta corrida; se cruzan con gold.etl_log).
+
 Manejo de errores (fail-fast):
     TRUNCATE, carga y validaciones corren en una sola transacción. Si algo falla,
     gold queda como estaba.
@@ -113,6 +116,12 @@ def cargar_gold(engine, run_id: str, fecha_carga: datetime) -> None:
     # Todo corre en una transacción: si algo falla, gold queda como estaba.
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {', '.join(f'{SCHEMA}.{t}' for t in TABLAS)} RESTART IDENTITY"))
+        # Trazabilidad: gold.sql lee estos valores con current_setting() al cargar los hechos.
+        # is_local = true: solo viven dentro de esta transacción.
+        conn.execute(
+            text("SELECT set_config('gold.run_id', :run_id, true), set_config('gold.fecha_carga', :fecha_carga, true)"),
+            {"run_id": run_id, "fecha_carga": fecha_carga.isoformat()},
+        )
         conn.exec_driver_sql(GOLD_SQL.read_text())
 
         validar(conn)

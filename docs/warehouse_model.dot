@@ -63,6 +63,9 @@ digraph warehouse_model {
         <tr><td align="left">pea, pe_inac</td><td align="left">INTEGER</td></tr>
         <tr><td align="left">pob0_14, pob15_64, pob65_mas</td><td align="left">INTEGER</td></tr>
         <tr><td align="left">vivtot, tvivhab</td><td align="left">INTEGER</td></tr>
+        <tr><td align="left">fuente, version_fuente</td><td align="left">TEXT (lineage)</td></tr>
+        <tr><td align="left">fecha_carga</td><td align="left">TIMESTAMPTZ (lineage)</td></tr>
+        <tr><td align="left">run_id</td><td align="left">UUID (lineage)</td></tr>
       </table>>];
 
     fact_establecimiento [label=<
@@ -76,6 +79,9 @@ digraph warehouse_model {
         <tr><td align="left" port="id_tiempo">id_tiempo</td><td align="left">INTEGER FK (edition month)</td></tr>
         <tr><td align="left">per_ocu</td><td align="left">TEXT</td></tr>
         <tr><td align="left">geom</td><td align="left">Point, 6372</td></tr>
+        <tr><td align="left">fuente, version_fuente</td><td align="left">TEXT (lineage)</td></tr>
+        <tr><td align="left">fecha_carga</td><td align="left">TIMESTAMPTZ (lineage)</td></tr>
+        <tr><td align="left">run_id</td><td align="left">UUID (lineage)</td></tr>
       </table>>];
 
     fact_incidencia [label=<
@@ -86,6 +92,9 @@ digraph warehouse_model {
         <tr><td align="left" port="id_tiempo"><b>id_tiempo</b></td><td align="left">INTEGER PK, FK</td></tr>
         <tr><td align="left" port="id_delito"><b>id_delito</b></td><td align="left">INTEGER PK, FK</td></tr>
         <tr><td align="left">incidentes</td><td align="left">INTEGER</td></tr>
+        <tr><td align="left">fuente, version_fuente</td><td align="left">TEXT (lineage)</td></tr>
+        <tr><td align="left">fecha_carga</td><td align="left">TIMESTAMPTZ (lineage)</td></tr>
+        <tr><td align="left">run_id</td><td align="left">UUID (lineage)</td></tr>
       </table>>];
 
     // ---------------------------------------------------------------- bridge

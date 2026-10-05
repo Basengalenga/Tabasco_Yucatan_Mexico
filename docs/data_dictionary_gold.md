@@ -92,6 +92,10 @@ Text is normalized (lower case, no accents).
 | `pob65_mas` | INTEGER | | Population aged 65+ | yes |
 | `vivtot` | INTEGER | | Total dwellings | yes |
 | `tvivhab` | INTEGER | | Inhabited dwellings | yes |
+| `fuente` | TEXT | | Source name, copied from silver | |
+| `version_fuente` | TEXT | | Source version, copied from silver | |
+| `fecha_carga` | TIMESTAMPTZ | | Time of the gold run that loaded the row (UTC) | |
+| `run_id` | UUID | | Gold run that loaded the row (joins with `gold.etl_log`) | |
 
 `NULL` = confidential or unavailable in the source.
 
@@ -112,6 +116,10 @@ Text is normalized (lower case, no accents).
 | `id_tiempo` | INTEGER | FK → `dim_tiempo` | Month of the edition (`'2020_11'` → `202011`) |
 | `per_ocu` | TEXT | | Employee-size band (degenerate attribute) |
 | `geom` | geometry(Point, 6372) | GiST index | Establishment location |
+| `fuente` | TEXT | | Source name, copied from silver |
+| `version_fuente` | TEXT | | Source version / edition, copied from silver |
+| `fecha_carga` | TIMESTAMPTZ | | Time of the gold run that loaded the row (UTC) |
+| `run_id` | UUID | | Gold run that loaded the row (joins with `gold.etl_log`) |
 
 Measure: row count (one establishment).
 
@@ -126,6 +134,10 @@ zero incidents). **From:** `silver.incidencia_delictiva`.
 | `id_tiempo` | INTEGER | PK, FK → `dim_tiempo` | Month | |
 | `id_delito` | INTEGER | PK, FK → `dim_delito` | Crime category | |
 | `incidentes` | INTEGER | ≥ 0 | Reported incidents (SESNSP, common jurisdiction) | yes, across all dimensions |
+| `fuente` | TEXT | | Source name, copied from silver | |
+| `version_fuente` | TEXT | | Source version, copied from silver | |
+| `fecha_carga` | TIMESTAMPTZ | | Time of the gold run that loaded the row (UTC) | |
+| `run_id` | UUID | | Gold run that loaded the row (joins with `gold.etl_log`) | |
 
 ---
 
