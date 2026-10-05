@@ -100,6 +100,10 @@ orden. Todas las tablas se definen en `sql/init.sql`.
   transacción; una descarga fallida nunca deja una tabla incompleta.
 - Cada ejecución reemplaza la tabla completa.
 
+El repositorio no guarda los archivos originales (no hay `data/raw/`): bronze es la copia
+cruda e inalterada de cada fuente, dentro de la base, y se reconstruye en cualquier momento
+desde las URLs oficiales (`_source_url`).
+
 ### Silver (`src/bronze_to_silver.py`)
 
 - Valores confidenciales o no disponibles del INEGI (`*`, `N/D`) → `NULL`.
@@ -131,7 +135,19 @@ por año, establecimientos por edición y que ningún municipio quede sin vecino
 `gold_analytics.py` lee solo de gold y escribe los resultados en `gold.resultado_*`. Los dos
 registran sus conteos en `gold.etl_log`.
 
+`validaciones/gold.sql` calcula cada KPI requerido directamente desde las tablas de hechos y
+dimensiones, sin pasar por la vista `gold.kpi_municipio_anio`, para demostrar que el
+warehouse conserva la información necesaria sin volver a las fuentes.
+
 ## Data warehouse
+
+Documentación del modelo en `docs/`:
+
+- Diagrama dimensional: [`docs/warehouse_model.png`](docs/warehouse_model.png) (fuente
+  Graphviz en `warehouse_model.dot`; versión Mermaid y granos en
+  [`docs/warehouse_model.md`](docs/warehouse_model.md)).
+- Diccionario de datos por capa: [bronze](docs/data_dictionary_bronze.md),
+  [silver](docs/data_dictionary_silver.md) y [gold](docs/data_dictionary_gold.md).
 
 ### Modelo
 
@@ -197,6 +213,20 @@ significancia al 0.05):
 - **Moran bivariado**: tasa delictiva vs densidad de negocios.
 
 Los resultados y su interpretación están en [`hallazgos.md`](hallazgos.md).
+
+### Mapas y figuras
+
+`src/figuras.py` lee solo de gold y genera PNG en `outputs/` (93 archivos):
+
+| Carpeta | Contenido |
+| --- | --- |
+| `outputs/maps/<año>/` | Coropletas de población, densidad poblacional, densidad de negocios, negocios por 1,000 hab, tasa delictiva e incidentes por 100 negocios; mapas LISA de los dos indicadores; sector dominante |
+| `outputs/figures/<año>/` | Dispersión de las tres correlaciones, diagramas de Moran, incidentes por tipo de delito |
+| `outputs/figures/serie/` | Series 2020–2025: Moran global, incidentes y establecimientos por año |
+
+Las coropletas de un mismo KPI usan los mismos cortes en todos los años (quintiles del panel
+2020–2025), para que los mapas de distintos años sean comparables. No forma parte del DAG;
+ver el paso 5 de [Cómo reproducirlo](#cómo-reproducirlo).
 
 ### Regla de vecindad (Queen)
 
@@ -286,13 +316,30 @@ Requisitos: Docker con Docker Compose.
    extractores de una misma corrida comparten `_run_id` (derivado del run de Airflow) e
    `_ingested_at` (`logical_date` del run).
 
-3. (Opcional) Correr las validaciones de silver:
+3. (Opcional) Correr las validaciones de silver y gold:
 
    ```bash
    docker exec -i yucatan_dw psql -U admin -d yucatan_dw < validaciones/silver.sql
+   docker exec -i yucatan_dw psql -U admin -d yucatan_dw < validaciones/gold.sql
    ```
 
+   `validaciones/gold.sql` usa por defecto el año 2024 (variables `anio` y `edicion` al
+   inicio del archivo).
+
 4. Abrir el dashboard en http://localhost:8501.
+
+5. Generar los mapas y figuras de `outputs/` (con gold ya cargado), en un contenedor
+   desechable con la imagen de Airflow:
+
+   ```bash
+   docker compose run --rm --no-deps --user "$(id -u):0" \
+     -v "$PWD/outputs:/opt/airflow/outputs" \
+     --entrypoint python airflow /opt/airflow/src/figuras.py
+   ```
+
+   `--user` hace que los PNG queden a nombre de tu usuario y no del usuario de Airflow. Cada
+   ejecución sobrescribe los PNG. Si la imagen se construyó antes de agregar `matplotlib` a
+   `requirements.txt`, reconstruirla primero con `docker compose build airflow`.
 
 El contenedor `airflow` monta `./dags`, `./src` y `./sql` en `/opt/airflow/` como solo
 lectura (`:ro`): Airflow solo necesita leerlos, y así no los modifica por accidente. Los
@@ -345,10 +392,16 @@ src/extractor_to_bronze.py    # extracción y carga a bronze
 src/bronze_to_silver.py       # bronze -> silver (limpieza y spatial join)
 src/silver_to_gold.py         # silver -> gold (ejecuta sql/gold/gold.sql y valida)
 src/gold_analytics.py         # correlaciones, Moran, LISA -> gold.resultado_*
+src/figuras.py                # mapas y figuras desde gold -> outputs/
 dags/pipeline_yucatan_dw.py   # DAG de Airflow con todo el pipeline
 sql/init.sql                  # extensión PostGIS, esquemas y DDL de todas las tablas
 sql/gold/gold.sql             # carga de gold y vistas (en subcarpeta: Docker no lo ejecuta)
 validaciones/silver.sql       # validaciones post-carga de silver
+validaciones/gold.sql         # cálculo de cada KPI desde hechos y dimensiones
+docs/warehouse_model.*        # diagrama dimensional (PNG, Graphviz y Mermaid)
+docs/data_dictionary_*.md     # diccionario de datos de bronze, silver y gold
+outputs/maps/                 # coropletas y mapas LISA por año
+outputs/figures/              # correlaciones, Moran, incidentes por tipo y series
 api/                          # API FastAPI sobre gold
 dashboard/                    # dashboard Streamlit que consume la API
 airflow/Dockerfile            # imagen de Airflow con las dependencias de src/

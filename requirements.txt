@@ -10,3 +10,4 @@ openpyxl
 scipy
 libpysal
 esda
+matplotlib
