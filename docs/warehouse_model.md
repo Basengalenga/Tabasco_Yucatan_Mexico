@@ -1,113 +1,99 @@
 # Warehouse model (gold layer)
 
-Star schema of `yucatan_dw.gold`, loaded by `src/silver_to_gold.py` (`sql/gold/gold.sql`).
-DDL in `sql/init.sql`. Static image: [`warehouse_model.png`](warehouse_model.png)
-(source: [`warehouse_model.dot`](warehouse_model.dot)). Column details:
-[`data_dictionary_gold.md`](data_dictionary_gold.md).
+Star schema of `economia_digital_dw.gold`, loaded by `src/silver_to_gold.py` (`sql/gold/gold.sql`
+plus the design-based survey estimates computed in Python). DDL in `sql/init.sql`. Static image:
+[`warehouse_model.png`](warehouse_model.png) (source: [`warehouse_model.dot`](warehouse_model.dot)).
+Column details: [`data_dictionary_gold.md`](data_dictionary_gold.md).
 
 ```mermaid
 erDiagram
-    dim_municipio ||--|| fact_censo : "cvegeo"
-    dim_municipio ||--o{ fact_establecimiento : "cvegeo"
-    dim_municipio ||--o{ fact_incidencia : "cvegeo"
-    dim_tiempo ||--o{ fact_establecimiento : "id_tiempo (edition month)"
-    dim_tiempo ||--o{ fact_incidencia : "id_tiempo"
-    dim_actividad ||--o{ fact_establecimiento : "id_actividad"
-    dim_delito ||--o{ fact_incidencia : "id_delito"
-    dim_municipio ||--o{ vecinos_municipio : "cvegeo"
-    dim_municipio ||--o{ vecinos_municipio : "cvegeo_vecino"
+    dim_entidad ||--o{ fact_encuesta_tic : "cve_ent"
+    dim_tiempo ||--o{ fact_encuesta_tic : "anio"
+    dim_indicador ||--o{ fact_encuesta_tic : "id_indicador"
+    dim_entidad ||--o{ fact_valor_entidad : "cve_ent"
+    dim_tiempo ||--o{ fact_valor_entidad : "anio"
+    dim_tiempo ||--o{ fact_comercio_electronico : "anio"
+    dim_tiempo ||--o{ fact_oecd_tic : "anio"
+    dim_pais ||--o{ fact_oecd_tic : "cod_pais"
 
-    dim_municipio {
-        CHAR5 cvegeo PK
+    dim_entidad {
+        CHAR2 cve_ent PK "00 = national"
         TEXT nombre
-        DOUBLE area_km2
-        MULTIPOLYGON_6372 geom
+        BOOLEAN es_foco "00, 27, 31"
     }
     dim_tiempo {
-        INTEGER id_tiempo PK "YYYYMM"
-        SMALLINT anio
-        SMALLINT mes
-        SMALLINT trimestre
-        TEXT nombre_mes
+        SMALLINT anio PK
+        TEXT sexenio
     }
-    dim_actividad {
-        SERIAL id_actividad PK
-        CHAR6 codigo_clase UK
-        TEXT desc_clase
-        TEXT version_scian UK
-        CHAR4 codigo_rama
-        TEXT desc_rama
-        CHAR3 codigo_subsector
-        TEXT desc_subsector
-        VARCHAR5 codigo_sector
-        TEXT desc_sector
-        BOOLEAN es_retail
-        BOOLEAN es_servicio
+    dim_indicador {
+        TEXT id_indicador PK
+        TEXT nombre
+        TEXT dimension "acceso, uso, valor, brecha"
+        TEXT unidad
+        TEXT universo
+        TEXT fuente
     }
-    dim_delito {
-        SERIAL id_delito PK
-        TEXT bien_juridico UK
-        TEXT tipo_delito UK
-        TEXT subtipo_delito UK
-        TEXT modalidad UK
+    dim_pais {
+        TEXT cod_pais PK
+        TEXT nombre
     }
-    fact_censo {
-        CHAR5 cvegeo PK,FK
-        INTEGER pobtot
-        INTEGER p_12ymas
-        INTEGER pea
-        INTEGER pe_inac
-        INTEGER pob0_14
-        INTEGER pob15_64
-        INTEGER pob65_mas
-        INTEGER vivtot
-        INTEGER tvivhab
-        TEXT fuente "lineage"
-        TEXT version_fuente "lineage"
-        TIMESTAMPTZ fecha_carga "lineage"
-        UUID run_id "lineage"
+    fact_encuesta_tic {
+        SMALLINT anio PK,FK
+        CHAR2 cve_ent PK,FK
+        TEXT id_indicador PK,FK
+        TEXT grupo_edad PK "total, 16_74"
+        DOUBLE estimacion "percent"
+        DOUBLE error_estandar
+        DOUBLE cv
+        DOUBLE li_90
+        DOUBLE ls_90
+        TEXT calidad
+        INTEGER n_muestra
+        BIGINT universo_expandido
     }
-    fact_establecimiento {
-        BIGINT id_denue PK
-        CHAR7 edicion PK
-        CHAR5 cvegeo FK
-        INTEGER id_actividad FK
-        INTEGER id_tiempo FK
-        TEXT per_ocu
-        POINT_6372 geom
-        TEXT fuente "lineage"
-        TEXT version_fuente "lineage"
-        TIMESTAMPTZ fecha_carga "lineage"
-        UUID run_id "lineage"
+    fact_valor_entidad {
+        SMALLINT anio PK,FK
+        CHAR2 cve_ent PK,FK
+        TEXT concepto PK "vab_total, vab_51, vab_21"
+        TEXT precios PK "corrientes, constantes_2018"
+        DOUBLE valor_mdp
+        TEXT estatus_cifra
     }
-    fact_incidencia {
-        CHAR5 cvegeo PK,FK
-        INTEGER id_tiempo PK,FK
-        INTEGER id_delito PK,FK
-        INTEGER incidentes
-        TEXT fuente "lineage"
-        TEXT version_fuente "lineage"
-        TIMESTAMPTZ fecha_carga "lineage"
-        UUID run_id "lineage"
+    fact_comercio_electronico {
+        SMALLINT anio PK,FK
+        TEXT componente PK
+        TEXT medida PK
+        DOUBLE valor
+        TEXT estatus_cifra
     }
-    vecinos_municipio {
-        CHAR5 cvegeo PK,FK
-        CHAR5 cvegeo_vecino PK,FK
+    fact_oecd_tic {
+        SMALLINT anio PK,FK
+        TEXT cod_pais PK,FK
+        TEXT medida PK
+        TEXT unidad
+        DOUBLE valor
+        TEXT estatus_obs
     }
 ```
 
-## Grain
+## Grains
 
-| Table | Type | Grain |
+| Table / view | Type | Grain |
 | --- | --- | --- |
-| `dim_municipio` | dimension | one municipality (106) |
-| `dim_tiempo` | dimension | year-month, 2020–2025 (72) |
-| `dim_actividad` | dimension | SCIAN class × SCIAN version (2018, 2023) |
-| `dim_delito` | dimension | legal good × crime type × subtype × modality |
-| `fact_censo` | fact | municipality (Census 2020) |
-| `fact_establecimiento` | fact (periodic snapshot) | establishment × DENUE edition — **do not sum across editions** |
-| `fact_incidencia` | fact | municipality × month × crime |
-| `vecinos_municipio` | bridge | pair of contiguous municipalities (Queen), stored in both directions |
+| `dim_entidad` | dimension | state (32) + national `'00'` |
+| `dim_tiempo` | dimension | year, 2003–2025 (union of all sources) |
+| `dim_indicador` | dimension | indicator (19 survey + 4 value) |
+| `dim_pais` | dimension | OECD country or aggregate (OECD, EU27, EU28) |
+| `fact_encuesta_tic` | fact | year × state × indicator × age group (ENDUTIH 2020–2024) |
+| `fact_valor_entidad` | fact | year × state × concept × prices (PIB estatal 2003–2023) |
+| `fact_comercio_electronico` | fact | year × component × measure (national, 2013–2024) |
+| `fact_oecd_tic` | fact | year × country × measure (2015–2025) |
+| `kpi_entidad_anio` | view | year × state, survey indicators in columns + sector-51 value |
+| `valor_entidad_anio` | view | year × state, sector-51 share (with and without mining), real growth |
+| `comercio_electronico_anio` | view | year, national e-commerce GVA wide |
+| `resultado_*` | results | see [`data_dictionary_gold.md`](data_dictionary_gold.md) |
 
-The views `kpi_municipio_anio` and `cociente_localizacion` and the `resultado_*` tables
-are derived from this model and are documented in the gold data dictionary.
+**Why survey facts store estimates, not microdata.** Gold keeps one row per estimate with its
+standard error, so every consumer (API, dashboard, figures) shows the same number with the same
+uncertainty. The microdata stays in silver (`endutih_hogar`, `endutih_persona`), from which
+`validaciones/gold.sql` recomputes the point estimates.

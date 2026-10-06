@@ -2,176 +2,130 @@
 -- Lo ejecuta src/silver_to_gold.py dentro de una transacción, después del TRUNCATE.
 -- Vive en sql/gold/ para que Docker NO lo corra al crear la base (el entrypoint solo
 -- ejecuta los archivos de primer nivel de /docker-entrypoint-initdb.d).
--- Periodo de gold: 2020 a 2025.
+-- gold.dim_indicador y gold.fact_encuesta_tic NO se cargan aquí: las estimaciones de encuesta
+-- (con error estándar por diseño muestral) las calcula silver_to_gold.py en Python.
 -- Trazabilidad de los hechos: fuente y version_fuente se copian de silver; fecha_carga y run_id
 -- los fija silver_to_gold.py con set_config('gold.fecha_carga' / 'gold.run_id') en la transacción.
 
 -- --------------------------------------------------------------------------
 -- Dimensiones
 -- --------------------------------------------------------------------------
-INSERT INTO gold.dim_municipio (cvegeo, nombre, area_km2, geom)
-SELECT cvegeo, nombre_municipio, area_km2, geom
-FROM silver.municipios;
+INSERT INTO gold.dim_entidad (cve_ent, nombre, es_foco)
+SELECT cve_ent,
+       CASE cve_ent WHEN '00' THEN 'México (nacional)' ELSE nombre END,
+       es_foco
+FROM silver.cat_entidad;
 
-INSERT INTO gold.dim_tiempo (id_tiempo, anio, mes, trimestre, nombre_mes)
-SELECT a * 100 + m, a, m, (m - 1) / 3 + 1,
-       (ARRAY['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto',
-              'septiembre', 'octubre', 'noviembre', 'diciembre'])[m]
-FROM generate_series(2020, 2025) AS a, generate_series(1, 12) AS m;
+-- Años que cubre cualquiera de las fuentes, con el sexenio federal al que pertenecen
+INSERT INTO gold.dim_tiempo (anio, sexenio)
+SELECT a,
+       CASE WHEN a <= 2006 THEN '2000-2006' WHEN a <= 2012 THEN '2006-2012'
+            WHEN a <= 2018 THEN '2012-2018' WHEN a <= 2024 THEN '2018-2024' ELSE '2024-2030' END
+FROM (SELECT min(anio)::INTEGER AS desde, max(anio)::INTEGER AS hasta
+      FROM (SELECT anio FROM silver.vabcoel UNION ALL SELECT anio FROM silver.pib_entidad
+            UNION ALL SELECT anio FROM silver.endutih_hogar UNION ALL SELECT anio FROM silver.oecd_ict) t) r,
+     generate_series(r.desde, r.hasta) AS a;
 
--- Jerarquía por prefijo del código de clase; el sector se lleva a rango (31-33, 48-49) como en silver.
-INSERT INTO gold.dim_actividad (codigo_clase, desc_clase, version_scian, codigo_rama, desc_rama,
-                                codigo_subsector, desc_subsector, codigo_sector, desc_sector,
-                                es_retail, es_servicio)
-SELECT c.codigo, c.descripcion, c.version_scian,
-       r.codigo, r.descripcion,
-       ss.codigo, ss.descripcion,
-       s.codigo, s.descripcion,
-       c.es_retail, c.es_servicio
-FROM silver.cat_scian c
-JOIN silver.cat_scian r  ON r.version_scian  = c.version_scian AND r.nivel  = 'rama'      AND r.codigo  = left(c.codigo, 4)
-JOIN silver.cat_scian ss ON ss.version_scian = c.version_scian AND ss.nivel = 'subsector' AND ss.codigo = left(c.codigo, 3)
-JOIN silver.cat_scian s  ON s.version_scian  = c.version_scian AND s.nivel  = 'sector'    AND s.codigo  =
-     CASE WHEN left(c.codigo, 2) IN ('31', '32', '33') THEN '31-33'
-          WHEN left(c.codigo, 2) IN ('48', '49') THEN '48-49'
-          ELSE left(c.codigo, 2) END
-WHERE c.nivel = 'clase';
-
-INSERT INTO gold.dim_delito (bien_juridico, tipo_delito, subtipo_delito, modalidad)
-SELECT DISTINCT bien_juridico, tipo_delito, subtipo_delito, modalidad
-FROM silver.incidencia_delictiva
-WHERE anio BETWEEN 2020 AND 2025
-ORDER BY 1, 2, 3, 4;
+INSERT INTO gold.dim_pais (cod_pais, nombre)
+SELECT DISTINCT ON (cod_pais) cod_pais, pais
+FROM silver.oecd_ict
+ORDER BY cod_pais, anio DESC;
 
 -- --------------------------------------------------------------------------
 -- Hechos
 -- --------------------------------------------------------------------------
-INSERT INTO gold.fact_censo (cvegeo, pobtot, p_12ymas, pea, pe_inac, pob0_14, pob15_64, pob65_mas, vivtot, tvivhab,
-                             fuente, version_fuente, fecha_carga, run_id)
-SELECT cvegeo, pobtot, p_12ymas, pea, pe_inac, pob0_14, pob15_64, pob65_mas, vivtot, tvivhab,
-       fuente, version_fuente,
+INSERT INTO gold.fact_valor_entidad (anio, cve_ent, concepto, precios, valor_mdp, estatus_cifra,
+                                     fuente, version_fuente, fecha_carga, run_id)
+SELECT anio, cve_ent, concepto, precios, valor_mdp, estatus_cifra, fuente, version_fuente,
        current_setting('gold.fecha_carga')::TIMESTAMPTZ, current_setting('gold.run_id')::UUID
-FROM silver.censo_municipal;
+FROM silver.pib_entidad;
 
--- id_tiempo = mes de la edición ('2020_11' -> 202011)
-INSERT INTO gold.fact_establecimiento (id_denue, edicion, cvegeo, id_actividad, id_tiempo, per_ocu, geom,
-                                       fuente, version_fuente, fecha_carga, run_id)
-SELECT d.id_denue, d.edicion, d.cvegeo, a.id_actividad, replace(d.edicion, '_', '')::INTEGER, d.per_ocu, d.geom,
-       d.fuente, d.version_fuente,
+INSERT INTO gold.fact_comercio_electronico (anio, componente, medida, valor, estatus_cifra,
+                                            fuente, version_fuente, fecha_carga, run_id)
+SELECT anio, componente, medida, valor, estatus_cifra, fuente, version_fuente,
        current_setting('gold.fecha_carga')::TIMESTAMPTZ, current_setting('gold.run_id')::UUID
-FROM silver.denue_establecimientos d
-JOIN gold.dim_actividad a ON a.codigo_clase = d.codigo_act AND a.version_scian = d.version_scian;
+FROM silver.vabcoel;
 
-INSERT INTO gold.fact_incidencia (cvegeo, id_tiempo, id_delito, incidentes,
-                                  fuente, version_fuente, fecha_carga, run_id)
-SELECT i.cvegeo, i.anio * 100 + i.mes, d.id_delito, i.incidentes,
-       i.fuente, i.version_fuente,
+INSERT INTO gold.fact_oecd_tic (anio, cod_pais, medida, desc_medida, unidad, valor, estatus_obs,
+                                fuente, version_fuente, fecha_carga, run_id)
+SELECT anio, cod_pais, medida, desc_medida, unidad, valor, estatus_obs, fuente, version_fuente,
        current_setting('gold.fecha_carga')::TIMESTAMPTZ, current_setting('gold.run_id')::UUID
-FROM silver.incidencia_delictiva i
-JOIN gold.dim_delito d USING (bien_juridico, tipo_delito, subtipo_delito, modalidad)
-WHERE i.anio BETWEEN 2020 AND 2025;
-
--- Contigüidad Queen: vecinos si comparten un borde o solo un vértice.
--- DECISIÓN HUMANA: se usa ST_Intersects y no ST_Touches porque 45 pares de municipios
--- vecinos se enciman unos m² (máx. 3.61 m², imprecisión del Marco Geoestadístico) y
--- ST_Touches los descarta (Kanasín quedaba sin vecinos). Ningún par separado está a < 1 m,
--- así que ST_Intersects no agrega falsos vecinos (ver README).
-INSERT INTO gold.vecinos_municipio (cvegeo, cvegeo_vecino)
-SELECT a.cvegeo, b.cvegeo
-FROM gold.dim_municipio a
-JOIN gold.dim_municipio b ON a.cvegeo <> b.cvegeo AND ST_Intersects(a.geom, b.geom);
+FROM silver.oecd_ict;
 
 -- --------------------------------------------------------------------------
 -- Vistas
 -- --------------------------------------------------------------------------
 
--- Panel anual municipio × año (2020 a 2025).
---   Población: Censo 2020 para todos los años.
---   DENUE: edición de noviembre de cada año; 2025 usa 2025_05 (no existe noviembre).
---   Crimen: suma de los 12 meses del año.
---   Actividad dominante: sector con más negocios; empate -> código de sector menor.
-CREATE OR REPLACE VIEW gold.kpi_municipio_anio AS
-WITH anio_edicion (anio, edicion) AS (
-    VALUES (2020, '2020_11'), (2021, '2021_11'), (2022, '2022_11'),
-           (2023, '2023_11'), (2024, '2024_11'), (2025, '2025_05')
-),
-negocios AS (
-    SELECT ae.anio, f.cvegeo,
-           count(*)                              AS total_negocios,
-           count(*) FILTER (WHERE a.es_retail)   AS negocios_retail,
-           count(*) FILTER (WHERE a.es_servicio) AS negocios_servicio
-    FROM anio_edicion ae
-    JOIN gold.fact_establecimiento f ON f.edicion = ae.edicion
-    JOIN gold.dim_actividad a USING (id_actividad)
-    GROUP BY ae.anio, f.cvegeo
-),
-sector_dominante AS (
-    SELECT DISTINCT ON (ae.anio, f.cvegeo)
-           ae.anio, f.cvegeo, a.codigo_sector, a.desc_sector
-    FROM anio_edicion ae
-    JOIN gold.fact_establecimiento f ON f.edicion = ae.edicion
-    JOIN gold.dim_actividad a USING (id_actividad)
-    GROUP BY ae.anio, f.cvegeo, a.codigo_sector, a.desc_sector
-    ORDER BY ae.anio, f.cvegeo, count(*) DESC, a.codigo_sector
-),
-crimen AS (
-    SELECT t.anio, i.cvegeo, sum(i.incidentes) AS total_incidentes
-    FROM gold.fact_incidencia i
-    JOIN gold.dim_tiempo t USING (id_tiempo)
-    GROUP BY t.anio, i.cvegeo
+-- Valor económico por entidad y año (indicadores de VALOR).
+--   participacion_51           = VAB del sector 51 / VAB total (precios corrientes), en %
+--   participacion_51_no_minero = VAB 51 / (VAB total - VAB sector 21), en %. Tabasco es un
+--                                estado petrolero: la minería infla su denominador y esconde
+--                                el peso real del sector de información en el resto de la economía.
+--   crecimiento_real_51        = variación anual del VAB 51 a precios de 2018, en %
+CREATE OR REPLACE VIEW gold.valor_entidad_anio AS
+WITH ancho AS (
+    SELECT anio, cve_ent,
+           max(valor_mdp) FILTER (WHERE concepto = 'vab_total' AND precios = 'corrientes')      AS vab_total,
+           max(valor_mdp) FILTER (WHERE concepto = 'vab_51'    AND precios = 'corrientes')      AS vab_51,
+           max(valor_mdp) FILTER (WHERE concepto = 'vab_21'    AND precios = 'corrientes')      AS vab_21,
+           max(valor_mdp) FILTER (WHERE concepto = 'vab_51'    AND precios = 'constantes_2018') AS vab_51_real,
+           max(valor_mdp) FILTER (WHERE concepto = 'vab_total' AND precios = 'constantes_2018') AS vab_total_real,
+           max(estatus_cifra)                                                                   AS estatus_cifra
+    FROM gold.fact_valor_entidad
+    GROUP BY anio, cve_ent
 )
-SELECT ae.anio,
-       m.cvegeo,
-       m.nombre,
-       c.pobtot                                                              AS poblacion_total,
-       c.pobtot / NULLIF(m.area_km2, 0)                                      AS densidad_poblacional,
-       c.pea::DOUBLE PRECISION / NULLIF(c.p_12ymas, 0)                       AS tasa_pea,
-       c.pob0_14::DOUBLE PRECISION / NULLIF(c.pobtot, 0)                     AS prop_0_14,
-       c.pob15_64::DOUBLE PRECISION / NULLIF(c.pobtot, 0)                    AS prop_15_64,
-       c.pob65_mas::DOUBLE PRECISION / NULLIF(c.pobtot, 0)                   AS prop_65_mas,
-       n.total_negocios,
-       n.total_negocios / NULLIF(m.area_km2, 0)                              AS densidad_negocios,
-       1000.0 * n.total_negocios / NULLIF(c.pobtot, 0)                       AS negocios_por_1000_hab,
-       n.negocios_retail / NULLIF(m.area_km2, 0)                             AS densidad_retail,
-       n.negocios_servicio / NULLIF(m.area_km2, 0)                           AS densidad_servicios,
-       sd.codigo_sector                                                      AS sector_dominante,
-       sd.desc_sector                                                        AS desc_sector_dominante,
-       cr.total_incidentes,
-       1000.0 * cr.total_incidentes / NULLIF(c.pobtot, 0)                    AS tasa_delictiva_1000_hab,
-       100.0 * cr.total_incidentes / NULLIF(n.total_negocios, 0)             AS incidentes_por_100_negocios,
-       m.geom
-FROM gold.dim_municipio m
-CROSS JOIN anio_edicion ae
-JOIN gold.fact_censo c USING (cvegeo)
-LEFT JOIN negocios n          ON n.cvegeo = m.cvegeo  AND n.anio = ae.anio
-LEFT JOIN sector_dominante sd ON sd.cvegeo = m.cvegeo AND sd.anio = ae.anio
-LEFT JOIN crimen cr           ON cr.cvegeo = m.cvegeo AND cr.anio = ae.anio;
+SELECT a.anio, a.cve_ent, e.nombre, e.es_foco,
+       a.vab_total, a.vab_51, a.vab_21, a.vab_51_real, a.vab_total_real,
+       100 * a.vab_51 / NULLIF(a.vab_total, 0)                          AS participacion_51,
+       100 * a.vab_51 / NULLIF(a.vab_total - a.vab_21, 0)               AS participacion_51_no_minero,
+       100 * a.vab_21 / NULLIF(a.vab_total, 0)                          AS participacion_21,
+       100 * (a.vab_51_real / NULLIF(lag(a.vab_51_real) OVER w, 0) - 1)       AS crecimiento_real_51,
+       100 * (a.vab_total_real / NULLIF(lag(a.vab_total_real) OVER w, 0) - 1) AS crecimiento_real_total,
+       a.estatus_cifra
+FROM ancho a
+JOIN gold.dim_entidad e USING (cve_ent)
+WINDOW w AS (PARTITION BY a.cve_ent ORDER BY a.anio);
 
--- Cociente de localización municipio × año × sector, con la misma regla de edición por año.
--- LQ = (negocios del sector en el municipio / negocios del municipio)
---    / (negocios del sector en el estado / negocios del estado)
--- Solo incluye los sectores presentes en cada municipio.
-CREATE OR REPLACE VIEW gold.cociente_localizacion AS
-WITH anio_edicion (anio, edicion) AS (
-    VALUES (2020, '2020_11'), (2021, '2021_11'), (2022, '2022_11'),
-           (2023, '2023_11'), (2024, '2024_11'), (2025, '2025_05')
-),
-conteo AS (
-    SELECT ae.anio, f.cvegeo, a.codigo_sector, a.desc_sector, count(*) AS negocios_sector
-    FROM anio_edicion ae
-    JOIN gold.fact_establecimiento f ON f.edicion = ae.edicion
-    JOIN gold.dim_actividad a USING (id_actividad)
-    GROUP BY ae.anio, f.cvegeo, a.codigo_sector, a.desc_sector
-),
-totales AS (
-    SELECT conteo.*,
-           sum(negocios_sector) OVER (PARTITION BY anio, cvegeo)        AS negocios_municipio,
-           sum(negocios_sector) OVER (PARTITION BY anio, codigo_sector) AS negocios_sector_estado,
-           sum(negocios_sector) OVER (PARTITION BY anio)                AS negocios_estado
-    FROM conteo
-)
-SELECT anio, cvegeo, codigo_sector, desc_sector,
-       negocios_sector, negocios_municipio, negocios_sector_estado, negocios_estado,
-       (negocios_sector::DOUBLE PRECISION / NULLIF(negocios_municipio, 0))
-         / NULLIF(negocios_sector_estado::DOUBLE PRECISION / NULLIF(negocios_estado, 0), 0) AS lq
-FROM totales;
+-- Comercio electrónico nacional (VABCOEL), una fila por año.
+CREATE OR REPLACE VIEW gold.comercio_electronico_anio AS
+SELECT anio,
+       max(valor) FILTER (WHERE componente = 'total' AND medida = 'mdp_corrientes')                 AS vab_coel_mdp,
+       max(valor) FILTER (WHERE componente = 'total' AND medida = 'mdp_constantes_2018')            AS vab_coel_real_mdp,
+       max(valor) FILTER (WHERE componente = 'total' AND medida = 'pct_pib')                        AS pct_pib,
+       max(valor) FILTER (WHERE componente = 'total' AND medida = 'pct_vab')                        AS pct_vab,
+       max(valor) FILTER (WHERE componente = 'comercio_al_por_mayor' AND medida = 'mdp_corrientes') AS mayor_mdp,
+       max(valor) FILTER (WHERE componente = 'comercio_al_por_menor' AND medida = 'mdp_corrientes') AS menor_mdp,
+       max(valor) FILTER (WHERE componente = 'otros_servicios' AND medida = 'mdp_corrientes')       AS otros_servicios_mdp,
+       max(valor) FILTER (WHERE componente = 'comercio_al_por_menor' AND medida = 'pct_vab_actividad')
+                                                                                                    AS pct_del_comercio_al_por_menor,
+       max(estatus_cifra)                                                                           AS estatus_cifra
+FROM gold.fact_comercio_electronico
+GROUP BY anio;
+
+-- Panel entidad × año con los indicadores de encuesta (grupo de edad total) en columnas
+-- y los de valor económico del mismo año. Solo años con ENDUTIH.
+CREATE OR REPLACE VIEW gold.kpi_entidad_anio AS
+SELECT f.anio, f.cve_ent, e.nombre, e.es_foco,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'hog_internet')         AS hog_internet,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'hog_computadora')      AS hog_computadora,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'hog_internet_fija')    AS hog_internet_fija,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'hog_celular')          AS hog_celular,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'pob_internet')         AS pob_internet,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'pob_computadora')      AS pob_computadora,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'pob_celular')          AS pob_celular,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'pob_smartphone')       AS pob_smartphone,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'pob_redes_sociales')   AS pob_redes_sociales,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'usu_compra')           AS usu_compra,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'usu_vende')            AS usu_vende,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'usu_paga')             AS usu_paga,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'usu_banca')            AS usu_banca,
+       max(f.estimacion) FILTER (WHERE f.id_indicador = 'sin_internet_recursos') AS sin_internet_recursos,
+       v.participacion_51,
+       v.participacion_51_no_minero,
+       v.crecimiento_real_51
+FROM gold.fact_encuesta_tic f
+JOIN gold.dim_entidad e USING (cve_ent)
+LEFT JOIN gold.valor_entidad_anio v USING (anio, cve_ent)
+WHERE f.grupo_edad = 'total'
+GROUP BY f.anio, f.cve_ent, e.nombre, e.es_foco, v.participacion_51, v.participacion_51_no_minero,
+         v.crecimiento_real_51;

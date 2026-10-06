@@ -1,164 +1,129 @@
 # Data dictionary — silver layer
 
-Clean, typed and standardized data, one table per source. Loaded by
-`src/bronze_to_silver.py`; DDL in `sql/init.sql`; post-load checks in
-`validaciones/silver.sql`. Other layers: [bronze](data_dictionary_bronze.md) ·
-[gold](data_dictionary_gold.md).
+Clean, typed and harmonized data, one table per source. Loaded by `src/bronze_to_silver.py`;
+DDL in `sql/init.sql`; post-load checks in `validaciones/silver.sql`. Other layers:
+[bronze](data_dictionary_bronze.md) · [gold](data_dictionary_gold.md). Decision IDs (`Dxx`)
+refer to [`decisiones_limpieza.md`](decisiones_limpieza.md).
 
 **Silver rules**
 
-- Integration key: `cvegeo CHAR(5)` = `'31'` + 3-digit municipal code. Tables are never
-  joined by name.
-- Geometries in EPSG:6372 (Mexico ITRF2008 / LCC, metres); areas in km².
-- INEGI confidential or unavailable values (`*`, `N/D`) → `NULL`.
+- Geographic key: `cve_ent CHAR(2)`; `'00'` = national (D08).
+- ENDUTIH answers `1 = Sí / 2 = No` → `BOOLEAN`; any other code stops the pipeline.
 - Every table is reloaded with TRUNCATE + INSERT in a single transaction.
+- Lineage columns in every table except `etl_log`: `fuente`, `version_fuente`, `fecha_carga`.
 
-**Lineage columns (all tables except `etl_log`)**
+---
+
+## `silver.cat_entidad`
+
+**Grain:** state. **Rows:** 33. **From:** `bronze.endutih_cat_entidad` + national row.
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `fuente` | TEXT | Source name (e.g. `INEGI DENUE`, `SESNSP`) |
-| `version_fuente` | TEXT | Source version / edition (e.g. `Censo 2020`, `DENUE 2024-11`, `IDM_NM_dic25`) |
-| `fecha_carga` | TIMESTAMPTZ | Time of the silver run that loaded the row (UTC) |
+| `cve_ent` | CHAR(2) PK | State code; `'00'` national |
+| `nombre` | TEXT | Official name (`Estados Unidos Mexicanos` for `'00'`) |
+| `nombre_normalizado` | TEXT UNIQUE | Lower case, no accents (used only to key the state GDP, D16) |
+| `es_foco` | BOOLEAN | TRUE for `'00'`, `'27'` Tabasco, `'31'` Yucatán |
 
----
+## `silver.endutih_mapeo_variables`
 
-## `silver.municipios`
+**Grain:** year × concept × column. **Rows:** 80. Which source column measures each concept each
+year, with the INEGI dictionary text that validated it (D06).
 
-Municipal polygons. **Grain:** one municipality. **Rows:** 106. **From:** `bronze.marco_geo_municipal`.
+| Column | Type | Description |
+| --- | --- | --- |
+| `anio` | SMALLINT | Survey year |
+| `concepto` | TEXT | `internet`, `computadora`, `compra_internet`, ... |
+| `tabla_bronze` | TEXT | e.g. `endutih_usuarios_2023` |
+| `columna` | TEXT | e.g. `p7_21` |
+| `descripcion_diccionario` | TEXT | Question text from the INEGI data dictionary |
 
-| Column | Type | Key / constraint | Description |
-| --- | --- | --- | --- |
-| `cvegeo` | CHAR(5) | PK; `= cve_ent \|\| cve_mun` | Geostatistical key |
-| `cve_ent` | CHAR(2) | NOT NULL, `= '31'` | State code |
-| `cve_mun` | CHAR(3) | NOT NULL, 3 digits | Municipal code |
-| `nombre_municipio` | TEXT | NOT NULL | Official name (`nomgeo`) |
-| `geom` | geometry(MultiPolygon, 6372) | NOT NULL, `ST_IsValid`, GiST index | Boundary, repaired with `make_valid` and cast to MultiPolygon. **Progreso (31059) excludes the Arrecife Alacranes parts** (centroid inside `CAJA_ALACRANES`) |
-| `area_km2` | DOUBLE PRECISION | NOT NULL, > 0 | Area of `geom` in km² |
+## `silver.endutih_hogar`
 
----
+**Grain:** interviewed household × year. **Rows:** 292,981 (2020–2024). **From:**
+`bronze.endutih_hogares_<anio>`.
 
-## `silver.censo_municipal`
+| Column | Type | Description |
+| --- | --- | --- |
+| `anio`, `upm`, `viv_sel`, `hogar` | PK | Year and household keys (zero-padded, D07) |
+| `cve_ent` | CHAR(2) FK | State |
+| `est_dis`, `upm_dis` | TEXT | Design stratum and PSU |
+| `tloc` | SMALLINT | Locality size (1 = 100k+ inhabitants … 4 = rural) |
+| `fac_hog` | INTEGER > 0 | Household expansion factor |
+| `tiene_computadora` | BOOLEAN | Desktop **or** laptop **or** tablet (D11) |
+| `tiene_internet` | BOOLEAN | Internet connection at home (P4_4) |
+| `internet_fija` | BOOLEAN NULL | Fixed or fixed+mobile connection; FALSE without internet; NULL = "no sabe" (D12) |
+| `tiene_celular` | BOOLEAN | Any member has a mobile phone (P4_1_6) |
+| `razon_sin_internet` | SMALLINT NULL | Main reason without internet, P4_8 code 1–10 (1 lack of money, 2 not interested, 3 don't know how to use it, 6 no provider…); NULL when connected |
 
-Census 2020 municipal totals. **Grain:** one municipality. **Rows:** 106. **From:**
-`bronze.iter_2020` rows with `loc = '0000'` and `mun <> '000'` (grain changes from locality
-file to municipal totals). The sum of `pobtot` is validated against the state total row.
+## `silver.endutih_persona`
 
-| Column | Type | Key / constraint | Description |
-| --- | --- | --- | --- |
-| `cvegeo` | CHAR(5) | PK, FK → `municipios` | Municipality |
-| `pobtot` | INTEGER | ≥ 0 | Total population |
-| `p_12ymas` | INTEGER | ≥ 0 | Population aged 12 and over |
-| `pea` | INTEGER | ≥ 0 | Economically active population (12+) |
-| `pe_inac` | INTEGER | ≥ 0 | Economically inactive population (12+) |
-| `pob0_14` | INTEGER | ≥ 0 | Population aged 0–14 |
-| `pob15_64` | INTEGER | ≥ 0 | Population aged 15–64 |
-| `pob65_mas` | INTEGER | ≥ 0 | Population aged 65+ |
-| `vivtot` | INTEGER | ≥ 0 | Total dwellings |
-| `tvivhab` | INTEGER | ≥ 0 | Inhabited dwellings |
+**Grain:** selected informant aged 6+ × year (one per household). **Rows:** 292,981. **From:**
+`bronze.endutih_usuarios_<anio>` joined 1:1 with `bronze.endutih_usuarios2_<anio>`.
 
-All measures are nullable (`NULL` = `*` or `N/D` in the source).
+| Column | Type | Description |
+| --- | --- | --- |
+| `anio`, `upm`, `viv_sel`, `hogar`, `num_ren` | PK | Year and person keys |
+| `cve_ent`, `est_dis`, `upm_dis`, `tloc` | | As in households |
+| `fac_per` | INTEGER > 0 | Person expansion factor |
+| `edad`, `sexo` | SMALLINT | Age (≥ 6, validated), sex (1 man, 2 woman) |
+| `usa_internet` | BOOLEAN | Used internet in the last 3 months (P7_1) |
+| `usa_computadora` | BOOLEAN | Used a computer/laptop/tablet in the last 3 months (P6_1) |
+| `usa_celular` | BOOLEAN | Used a mobile phone in the last 3 months (P8_3) |
+| `usa_smartphone` | BOOLEAN | The phone used is a smartphone; FALSE if no phone (D18) |
+| `usa_redes_sociales` | BOOLEAN | Used social networks, last 3 months; FALSE for non-users (D13) |
+| `compra_internet` | BOOLEAN | Bought online, last 12 months (D13) |
+| `vende_internet` | BOOLEAN | Sold online, last 12 months (D13) |
+| `paga_internet` | BOOLEAN | Paid online, last 12 months (D13) |
+| `banca_electronica` | BOOLEAN | Used e-banking, last 3 months (D13) |
 
----
+## `silver.vabcoel`
 
-## `silver.cat_scian`
+**Grain:** year × component × measure. **Rows:** 228 (2013–2024). **From:** `bronze.vabcoel`
+(derived rows dropped, D10; component hierarchy fixed, D14).
 
-SCIAN catalogue. **Grain:** code × SCIAN version. **Rows:** 3,009. **From:** `bronze.scian`
-(sheets SECTOR, SUBSECTOR, RAMA, CLASE; the SUBRAMA level is omitted, and product-index
-rows without a code are dropped).
+| Column | Type | Description |
+| --- | --- | --- |
+| `anio` | SMALLINT | Year |
+| `componente` | TEXT | `total`, `comercio_al_por_mayor`, `comercio_al_por_menor`, `otros_servicios` |
+| `medida` | TEXT | `mdp_corrientes`, `mdp_constantes_2018`, `pct_pib`, `pct_vab`, `pct_vab_actividad` |
+| `valor` | DOUBLE | Millions of pesos or percent |
+| `estatus_cifra` | TEXT | `definitiva`, `revisada` (2023), `preliminar` (2024) |
 
-| Column | Type | Key / constraint | Description |
-| --- | --- | --- | --- |
-| `codigo` | VARCHAR(6) | PK (with `version_scian`); format checked by level | SCIAN code. Sectors 31-33 and 48-49 are stored as ranges, as INEGI publishes them |
-| `version_scian` | TEXT | PK; `SCIAN 2018` or `SCIAN 2023` | Catalogue version |
-| `nivel` | TEXT | `sector`, `subsector`, `rama`, `clase` | Hierarchy level |
-| `descripcion` | TEXT | NOT NULL | Category title (whitespace collapsed; trailing `T` marker removed) |
-| `es_retail` | BOOLEAN | NOT NULL | `true` if the code is in sector 46 (retail trade) |
-| `es_servicio` | BOOLEAN | NOT NULL | `true` if the code is in sectors 51 to 81 (services) |
+## `silver.pib_entidad`
 
----
+**Grain:** year × state × concept × prices. **Rows:** 4,158 (2003–2023 × 33 × 3 × 2). **From:**
+`bronze.pibe` (derived presentations dropped, D15; keyed by name, D16).
 
-## `silver.crosswalk_municipio_nombre`
+| Column | Type | Description |
+| --- | --- | --- |
+| `anio`, `cve_ent` | PK | Year and state (`'00'` national) |
+| `concepto` | TEXT | `vab_total`, `vab_51` (information in mass media), `vab_21` (mining) |
+| `precios` | TEXT | `corrientes`, `constantes_2018` |
+| `valor_mdp` | DOUBLE | Millions of pesos |
+| `estatus_cifra` | TEXT | `definitiva`, `revisada` (2022), `preliminar` (2023) |
 
-Name → key lookup across sources, used **only to check** that each source's name and code
-point to the same municipality. **Grain:** one distinct name as written in any source.
-**Rows:** 106.
+## `silver.oecd_ict`
 
-| Column | Type | Key / constraint | Description |
-| --- | --- | --- | --- |
-| `nombre_fuente` | TEXT | PK | Name exactly as it appears in the source(s) |
-| `nombre_normalizado` | TEXT | NOT NULL | Lower-case, accent-free, single-spaced name |
-| `cvegeo` | CHAR(5) | FK → `municipios` | Municipality the name maps to (taken from the code in the same source) |
+**Grain:** year × country × measure. **Rows:** 3,656. **From:** `bronze.oecd_ict_hogares` +
+`bronze.oecd_ict_individuos` (D17).
 
-`fuente` and `version_fuente` list every source where the name appears, comma-separated.
-
----
-
-## `silver.denue_establecimientos`
-
-Georeferenced establishments, all DENUE editions. **Grain:** establishment × edition (the
-same establishment appears once per edition). **Rows:** 809,056. **From:** `bronze.denue`.
-
-Transformations: duplicates on (`id`, `edicion`) removed; rows without coordinates dropped;
-points built from lat/lon in EPSG:6365 and reprojected to EPSG:6372; municipality assigned
-by spatial join (`intersects`), with ties resolved in favour of the source `cve_mun` (else
-lowest `cvegeo`); points outside every polygon reassigned to the nearest municipality if
-≤ 30 m away, otherwise dropped. Counts are logged in `etl_log`.
-
-| Column | Type | Key / constraint | Description |
-| --- | --- | --- | --- |
-| `id_denue` | BIGINT | PK (with `edicion`) | DENUE establishment ID |
-| `edicion` | CHAR(7) | PK; `YYYY_MM` | DENUE edition (`2020_11` … `2025_05`) |
-| `nombre_establecimiento` | TEXT | | Establishment name |
-| `codigo_act` | CHAR(6) | FK (with `version_scian`) → `cat_scian` | SCIAN class code |
-| `version_scian` | TEXT | NOT NULL | SCIAN version of the edition |
-| `sector_scian` | VARCHAR(5) | 2 digits or `31-33` / `48-49` | Sector derived from the first two digits of `codigo_act` |
-| `nombre_act` | TEXT | | SCIAN class name as written in DENUE |
-| `per_ocu` | TEXT | | Employee-size band: `0 a 5`, `6 a 10`, `11 a 30`, `31 a 50`, `51 a 100`, `101 a 250`, `251 y más personas` |
-| `fecha_alta` | DATE | | Month the establishment entered DENUE; source has only year-month, so day = 1 |
-| `latitud` | DOUBLE PRECISION | NOT NULL | Source latitude (EPSG:6365) |
-| `longitud` | DOUBLE PRECISION | NOT NULL | Source longitude (EPSG:6365) |
-| `geom` | geometry(Point, 6372) | NOT NULL, GiST index | Reprojected point |
-| `cve_mun_original` | CHAR(3) | | Municipal code as reported by DENUE |
-| `cvegeo` | CHAR(5) | NOT NULL, FK → `municipios` | Municipality **assigned by the spatial join** (replaces the source code) |
-| `coincide_municipio` | BOOLEAN | | `true` if `cvegeo` = `'31' \|\| cve_mun_original` |
-
----
-
-## `silver.incidencia_delictiva`
-
-Reported crime incidents. **Grain:** municipality × month × crime (legal good, type,
-subtype, modality). **Rows:** 1,371,216 (2015–2025). **From:**
-`bronze.incidencia_delictiva`, unpivoted from one column per month to one row per month.
-Category text is normalized (lower case, no accents, single spaces).
-
-| Column | Type | Key / constraint | Description |
-| --- | --- | --- | --- |
-| `cvegeo` | CHAR(5) | PK, FK → `municipios` | Municipality (`cve_municipio` from the source) |
-| `anio` | SMALLINT | PK | Year |
-| `mes` | SMALLINT | PK; 1–12 | Month |
-| `bien_juridico` | TEXT | NOT NULL | Legal good affected |
-| `tipo_delito` | TEXT | PK | Crime type |
-| `subtipo_delito` | TEXT | PK | Crime subtype |
-| `modalidad` | TEXT | PK | Modality |
-| `incidentes` | INTEGER | NOT NULL, ≥ 0 | Reported incidents in the month (zeros included) |
-
----
+| Column | Type | Description |
+| --- | --- | --- |
+| `anio`, `cod_pais`, `medida` | PK | Year, ISO-3 / aggregate code (`OECD`, `EU27`), measure code |
+| `pais`, `desc_medida` | TEXT | Labels |
+| `unidad` | TEXT | `pct_hogares` or `pct_personas_16_74` |
+| `valor` | DOUBLE 0–100 | Percent |
+| `estatus_obs` | TEXT NULL | OECD observation status (normal, series break, definition differs, low reliability) |
 
 ## `silver.etl_log`
 
-Run log of the silver ETL. Never truncated. **Grain:** run × table × metric.
+**Grain:** run × table × metric. Counts of every discard, recoding and cleaning decision.
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `id` | BIGSERIAL (PK) | Row ID |
-| `run_id` | UUID | Silver run ID |
-| `tabla` | TEXT | Silver table the metric refers to |
-| `metrica` | TEXT | Metric name (see below) |
-| `valor` | BIGINT | Metric value |
-| `fecha_carga` | TIMESTAMPTZ | Run timestamp |
-
-Metrics: `filas_cargadas` (every table); `geometrias_reparadas`,
-`partes_arrecife_alacranes_eliminadas` (`municipios`); `registros_bronze`,
-`duplicados_eliminados`, `descartados_coordenada_nula`, `puntos_en_limite_entre_municipios`,
-`reasignados_mas_cercano`, `descartados_fuera_umbral` (`denue_establecimientos`).
+| `run_id` | UUID | Silver run |
+| `tabla`, `metrica` | TEXT | e.g. `endutih_hogar` / `tipo_conexion_no_sabe_a_null_2024` |
+| `valor` | BIGINT | Records affected |
+| `detalle` | TEXT | Human-readable explanation |
+| `fecha_carga` | TIMESTAMPTZ | Run time |

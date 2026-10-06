@@ -1,288 +1,306 @@
-CREATE EXTENSION IF NOT EXISTS postgis;
+-- DDL de economia_digital_dw: esquemas y tablas de silver y gold.
+-- Docker lo ejecuta al crear el volumen de la base; los scripts de silver y gold lo vuelven a
+-- aplicar al inicio (es idempotente). Las tablas de bronze NO están aquí: el extractor las crea
+-- con las columnas exactas de cada archivo de la fuente (ver src/extractor_to_bronze.py).
 
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS silver;
 CREATE SCHEMA IF NOT EXISTS gold;
 
 -- ==========================================================================
--- Capa silver: datos limpios y estandarizados, uno a uno por fuente.
--- Solo estructura; la carga la hace dags/bronze_to_silver.py.
--- Llave de integración: cvegeo CHAR(5) = '31' + cve_mun (3 dígitos).
--- Geometrías en EPSG:6372. Áreas en km².
+-- Capa silver: datos limpios, tipados y armonizados, uno a uno por fuente.
+-- La carga la hace src/bronze_to_silver.py.
+-- Llave de integración geográfica: cve_ent CHAR(2) ('00' = nacional, '27' = Tabasco,
+-- '31' = Yucatán). Nunca se une por nombre salvo en el PIB estatal, que solo trae el
+-- nombre y se valida contra el catálogo (ver docs/decisiones_limpieza.md).
 -- ==========================================================================
 
--- 1. Municipios (INEGI Marco Geoestadístico)
-CREATE TABLE IF NOT EXISTS silver.municipios (
-    cvegeo            CHAR(5)                         PRIMARY KEY,
-    cve_ent           CHAR(2)                         NOT NULL CHECK (cve_ent = '31'),
-    cve_mun           CHAR(3)                         NOT NULL CHECK (cve_mun ~ '^[0-9]{3}$'),
-    nombre_municipio  TEXT                            NOT NULL,
-    geom              geometry(MultiPolygon, 6372)    NOT NULL CHECK (ST_IsValid(geom)),
-    area_km2          DOUBLE PRECISION                NOT NULL CHECK (area_km2 > 0),
-    fuente            TEXT                            NOT NULL,
-    version_fuente    TEXT                            NOT NULL,
-    fecha_carga       TIMESTAMPTZ                     NOT NULL,
-    CHECK (cvegeo = cve_ent || cve_mun)
-);
-CREATE INDEX IF NOT EXISTS municipios_geom_gist ON silver.municipios USING GIST (geom);
-
--- 2. Censo 2020, ITER, solo totales municipales (LOC = 0000).
---    NULL = valor confidencial o no disponible en la fuente ('*', 'N/D').
-CREATE TABLE IF NOT EXISTS silver.censo_municipal (
-    cvegeo          CHAR(5)       PRIMARY KEY REFERENCES silver.municipios (cvegeo),
-    pobtot          INTEGER       CHECK (pobtot >= 0),
-    p_12ymas        INTEGER       CHECK (p_12ymas >= 0),
-    pea             INTEGER       CHECK (pea >= 0),
-    pe_inac         INTEGER       CHECK (pe_inac >= 0),
-    pob0_14         INTEGER       CHECK (pob0_14 >= 0),
-    pob15_64        INTEGER       CHECK (pob15_64 >= 0),
-    pob65_mas       INTEGER       CHECK (pob65_mas >= 0),
-    vivtot          INTEGER       CHECK (vivtot >= 0),
-    tvivhab         INTEGER       CHECK (tvivhab >= 0),
-    fuente          TEXT          NOT NULL,
-    version_fuente  TEXT          NOT NULL,
-    fecha_carga     TIMESTAMPTZ   NOT NULL
-);
-
--- 6. Catálogo SCIAN (INEGI), versiones 2018 y 2023, 4 niveles (sin subrama).
---    Los sectores 31-33 y 48-49 se guardan como rango, igual que en INEGI.
-CREATE TABLE IF NOT EXISTS silver.cat_scian (
-    codigo          VARCHAR(6)    NOT NULL,
-    version_scian   TEXT          NOT NULL CHECK (version_scian IN ('SCIAN 2018', 'SCIAN 2023')),
-    nivel           TEXT          NOT NULL CHECK (nivel IN ('sector', 'subsector', 'rama', 'clase')),
-    descripcion     TEXT          NOT NULL,
-    es_retail       BOOLEAN       NOT NULL,  -- sector 46
-    es_servicio     BOOLEAN       NOT NULL,  -- sectores 51 a 81
-    fuente          TEXT          NOT NULL,
-    version_fuente  TEXT          NOT NULL,
-    fecha_carga     TIMESTAMPTZ   NOT NULL,
-    PRIMARY KEY (codigo, version_scian),
-    CHECK (
-           (nivel = 'sector'    AND codigo ~ '^([0-9]{2}|31-33|48-49)$')
-        OR (nivel = 'subsector' AND codigo ~ '^[0-9]{3}$')
-        OR (nivel = 'rama'      AND codigo ~ '^[0-9]{4}$')
-        OR (nivel = 'clase'     AND codigo ~ '^[0-9]{6}$')
-    )
-);
-
--- 3. DENUE, todas las ediciones. Un establecimiento aparece una vez por edición.
-CREATE TABLE IF NOT EXISTS silver.denue_establecimientos (
-    id_denue                BIGINT                   NOT NULL,
-    edicion                 CHAR(7)                  NOT NULL CHECK (edicion ~ '^[0-9]{4}_[0-9]{2}$'),
-    nombre_establecimiento  TEXT,
-    codigo_act              CHAR(6)                  NOT NULL CHECK (codigo_act ~ '^[0-9]{6}$'),
-    version_scian           TEXT                     NOT NULL,
-    sector_scian            VARCHAR(5)               NOT NULL CHECK (sector_scian ~ '^([0-9]{2}|31-33|48-49)$'),
-    nombre_act              TEXT,
-    per_ocu                 TEXT,                    -- estrato de personal ocupado
-    fecha_alta              DATE,                    -- el DENUE solo trae año y mes; se usa el día 1
-    latitud                 DOUBLE PRECISION         NOT NULL,
-    longitud                DOUBLE PRECISION         NOT NULL,
-    geom                    geometry(Point, 6372)    NOT NULL,
-    cve_mun_original        CHAR(3),                 -- cve_mun tal como lo trae el DENUE
-    cvegeo                  CHAR(5)                  NOT NULL REFERENCES silver.municipios (cvegeo),  -- por spatial join
-    coincide_municipio      BOOLEAN,
-    fuente                  TEXT                     NOT NULL,
-    version_fuente          TEXT                     NOT NULL,
-    fecha_carga             TIMESTAMPTZ              NOT NULL,
-    PRIMARY KEY (id_denue, edicion),
-    FOREIGN KEY (codigo_act, version_scian) REFERENCES silver.cat_scian (codigo, version_scian)
-);
-CREATE INDEX IF NOT EXISTS denue_geom_gist ON silver.denue_establecimientos USING GIST (geom);
-CREATE INDEX IF NOT EXISTS denue_cvegeo_idx ON silver.denue_establecimientos (cvegeo);
-CREATE INDEX IF NOT EXISTS denue_scian_idx ON silver.denue_establecimientos (codigo_act, version_scian);
-
--- 5. Crosswalk de nombres de municipio (todas las fuentes) a cvegeo
-CREATE TABLE IF NOT EXISTS silver.crosswalk_municipio_nombre (
-    nombre_fuente       TEXT          PRIMARY KEY,
-    nombre_normalizado  TEXT          NOT NULL,
-    cvegeo              CHAR(5)       NOT NULL REFERENCES silver.municipios (cvegeo),
-    fuente              TEXT          NOT NULL,  -- fuentes donde aparece el nombre
+-- 1. Catálogo de entidades (INEGI, catálogo de la ENDUTIH 2024) + fila nacional '00'
+CREATE TABLE IF NOT EXISTS silver.cat_entidad (
+    cve_ent             CHAR(2)       PRIMARY KEY CHECK (cve_ent ~ '^[0-9]{2}$'),
+    nombre              TEXT          NOT NULL,
+    nombre_normalizado  TEXT          NOT NULL UNIQUE,
+    es_foco             BOOLEAN       NOT NULL,   -- Yucatán, Tabasco y nacional
+    fuente              TEXT          NOT NULL,
     version_fuente      TEXT          NOT NULL,
     fecha_carga         TIMESTAMPTZ   NOT NULL
 );
 
--- 4. Incidencia delictiva municipal, fuero común (SESNSP), en formato largo
-CREATE TABLE IF NOT EXISTS silver.incidencia_delictiva (
-    cvegeo          CHAR(5)       NOT NULL REFERENCES silver.municipios (cvegeo),
-    anio            SMALLINT      NOT NULL,
-    mes             SMALLINT      NOT NULL CHECK (mes BETWEEN 1 AND 12),
-    bien_juridico   TEXT          NOT NULL,
-    tipo_delito     TEXT          NOT NULL,
-    subtipo_delito  TEXT          NOT NULL,
-    modalidad       TEXT          NOT NULL,
-    incidentes      INTEGER       NOT NULL CHECK (incidentes >= 0),
-    fuente          TEXT          NOT NULL,
-    version_fuente  TEXT          NOT NULL,
-    fecha_carga     TIMESTAMPTZ   NOT NULL,
-    PRIMARY KEY (cvegeo, anio, mes, tipo_delito, subtipo_delito, modalidad)
+-- 2. Mapeo de variables ENDUTIH: qué columna de qué tabla mide cada concepto en cada año.
+--    La numeración de las preguntas cambia entre años; cada mapeo se valida contra el texto
+--    del diccionario de datos de INEGI (palabra clave obligatoria).
+CREATE TABLE IF NOT EXISTS silver.endutih_mapeo_variables (
+    anio                    SMALLINT      NOT NULL,
+    concepto                TEXT          NOT NULL,
+    tabla_bronze            TEXT          NOT NULL,
+    columna                 TEXT          NOT NULL,
+    descripcion_diccionario TEXT          NOT NULL,
+    fuente                  TEXT          NOT NULL,
+    version_fuente          TEXT          NOT NULL,
+    fecha_carga             TIMESTAMPTZ   NOT NULL,
+    PRIMARY KEY (anio, concepto, columna)
 );
 
--- Bitácora del ETL de silver (descartes, reasignaciones, conteos). No se trunca.
+-- 3. ENDUTIH, hogares (una fila por hogar entrevistado y año).
+--    Banderas de población: NULL = 'no sabe' / 'no responde' en la fuente.
+CREATE TABLE IF NOT EXISTS silver.endutih_hogar (
+    anio                SMALLINT      NOT NULL CHECK (anio BETWEEN 2020 AND 2030),
+    upm                 TEXT          NOT NULL,
+    viv_sel             TEXT          NOT NULL,
+    hogar               TEXT          NOT NULL,
+    cve_ent             CHAR(2)       NOT NULL REFERENCES silver.cat_entidad (cve_ent),
+    est_dis             TEXT          NOT NULL,   -- estrato de diseño
+    upm_dis             TEXT          NOT NULL,   -- UPM de diseño
+    tloc                SMALLINT,                 -- tamaño de localidad (1 = 100 mil hab. y más)
+    fac_hog             INTEGER       NOT NULL CHECK (fac_hog > 0),
+    tiene_computadora   BOOLEAN       NOT NULL,   -- computadora de escritorio, laptop o tablet
+    tiene_internet      BOOLEAN       NOT NULL,
+    internet_fija       BOOLEAN,                  -- conexión fija o fija+móvil; NULL = no sabe
+    tiene_celular       BOOLEAN       NOT NULL,
+    razon_sin_internet  SMALLINT      CHECK (razon_sin_internet BETWEEN 1 AND 10),
+    fuente              TEXT          NOT NULL,
+    version_fuente      TEXT          NOT NULL,
+    fecha_carga         TIMESTAMPTZ   NOT NULL,
+    PRIMARY KEY (anio, upm, viv_sel, hogar)
+);
+
+-- 4. ENDUTIH, persona elegida de 6 años o más (cuestionario de usuario, una por hogar).
+--    Las preguntas de uso de internet solo se hacen a usuarios de internet; para los no
+--    usuarios la fuente deja el campo vacío y aquí se guarda FALSE (no realizó la actividad).
+CREATE TABLE IF NOT EXISTS silver.endutih_persona (
+    anio                SMALLINT      NOT NULL CHECK (anio BETWEEN 2020 AND 2030),
+    upm                 TEXT          NOT NULL,
+    viv_sel             TEXT          NOT NULL,
+    hogar               TEXT          NOT NULL,
+    num_ren             TEXT          NOT NULL,
+    cve_ent             CHAR(2)       NOT NULL REFERENCES silver.cat_entidad (cve_ent),
+    est_dis             TEXT          NOT NULL,
+    upm_dis             TEXT          NOT NULL,
+    tloc                SMALLINT,
+    fac_per             INTEGER       NOT NULL CHECK (fac_per > 0),
+    edad                SMALLINT      NOT NULL CHECK (edad >= 6),
+    sexo                SMALLINT      CHECK (sexo IN (1, 2)),
+    usa_internet        BOOLEAN       NOT NULL,
+    usa_computadora     BOOLEAN       NOT NULL,
+    usa_celular         BOOLEAN       NOT NULL,
+    usa_smartphone      BOOLEAN       NOT NULL,
+    usa_redes_sociales  BOOLEAN       NOT NULL,
+    compra_internet     BOOLEAN       NOT NULL,
+    vende_internet      BOOLEAN       NOT NULL,
+    paga_internet       BOOLEAN       NOT NULL,
+    banca_electronica   BOOLEAN       NOT NULL,
+    fuente              TEXT          NOT NULL,
+    version_fuente      TEXT          NOT NULL,
+    fecha_carga         TIMESTAMPTZ   NOT NULL,
+    PRIMARY KEY (anio, upm, viv_sel, hogar, num_ren)
+);
+
+-- 5. Valor Agregado Bruto del Comercio Electrónico (INEGI, cuentas nacionales), nacional.
+CREATE TABLE IF NOT EXISTS silver.vabcoel (
+    anio            SMALLINT          NOT NULL,
+    componente      TEXT              NOT NULL CHECK (componente IN
+                        ('total', 'comercio_al_por_mayor', 'comercio_al_por_menor', 'otros_servicios')),
+    medida          TEXT              NOT NULL CHECK (medida IN
+                        ('mdp_corrientes', 'mdp_constantes_2018', 'pct_pib', 'pct_vab',
+                         'pct_vab_actividad')),
+    valor           DOUBLE PRECISION  NOT NULL,
+    estatus_cifra   TEXT              NOT NULL CHECK (estatus_cifra IN ('definitiva', 'revisada', 'preliminar')),
+    fuente          TEXT              NOT NULL,
+    version_fuente  TEXT              NOT NULL,
+    fecha_carga     TIMESTAMPTZ       NOT NULL,
+    PRIMARY KEY (anio, componente, medida)
+);
+
+-- 6. PIB por entidad federativa (INEGI), VAB total y de los sectores 51 y 21.
+CREATE TABLE IF NOT EXISTS silver.pib_entidad (
+    anio            SMALLINT          NOT NULL,
+    cve_ent         CHAR(2)           NOT NULL REFERENCES silver.cat_entidad (cve_ent),
+    concepto        TEXT              NOT NULL CHECK (concepto IN ('vab_total', 'vab_51', 'vab_21')),
+    precios         TEXT              NOT NULL CHECK (precios IN ('corrientes', 'constantes_2018')),
+    valor_mdp       DOUBLE PRECISION  NOT NULL,
+    estatus_cifra   TEXT              NOT NULL CHECK (estatus_cifra IN ('definitiva', 'revisada', 'preliminar')),
+    fuente          TEXT              NOT NULL,
+    version_fuente  TEXT              NOT NULL,
+    fecha_carga     TIMESTAMPTZ       NOT NULL,
+    PRIMARY KEY (anio, cve_ent, concepto, precios)
+);
+
+-- 7. OECD ICT Access and Usage by Households and Individuals (comparación internacional).
+CREATE TABLE IF NOT EXISTS silver.oecd_ict (
+    anio            SMALLINT          NOT NULL,
+    cod_pais        TEXT              NOT NULL,
+    pais            TEXT              NOT NULL,
+    medida          TEXT              NOT NULL,
+    desc_medida     TEXT              NOT NULL,
+    unidad          TEXT              NOT NULL CHECK (unidad IN ('pct_hogares', 'pct_personas_16_74')),
+    valor           DOUBLE PRECISION  NOT NULL CHECK (valor BETWEEN 0 AND 100),
+    estatus_obs     TEXT,
+    fuente          TEXT              NOT NULL,
+    version_fuente  TEXT              NOT NULL,
+    fecha_carga     TIMESTAMPTZ       NOT NULL,
+    PRIMARY KEY (anio, cod_pais, medida)
+);
+
+-- 8. Bitácora: conteos, descartes y decisiones de limpieza de cada corrida
 CREATE TABLE IF NOT EXISTS silver.etl_log (
     id           BIGSERIAL     PRIMARY KEY,
     run_id       UUID          NOT NULL,
     tabla        TEXT          NOT NULL,
     metrica      TEXT          NOT NULL,
     valor        BIGINT        NOT NULL,
+    detalle      TEXT,
     fecha_carga  TIMESTAMPTZ   NOT NULL
 );
 
 -- ==========================================================================
--- Capa gold: modelo estrella y resultados del análisis espacial.
--- Solo estructura; la carga la hacen src/silver_to_gold.py (sql/gold/gold.sql)
--- y src/gold_analytics.py (tablas resultado_*). Las vistas viven en sql/gold/gold.sql.
+-- Capa gold: modelo dimensional. La carga la hacen src/silver_to_gold.py
+-- (sql/gold/gold.sql + estimaciones de encuesta) y src/gold_analytics.py (resultado_*).
 -- ==========================================================================
 
--- Dimensión municipio
-CREATE TABLE IF NOT EXISTS gold.dim_municipio (
-    cvegeo    CHAR(5)                         PRIMARY KEY,
-    nombre    TEXT                            NOT NULL,
-    area_km2  DOUBLE PRECISION                NOT NULL,
-    geom      geometry(MultiPolygon, 6372)    NOT NULL
+CREATE TABLE IF NOT EXISTS gold.dim_entidad (
+    cve_ent   CHAR(2)   PRIMARY KEY,
+    nombre    TEXT      NOT NULL,
+    es_foco   BOOLEAN   NOT NULL
 );
-CREATE INDEX IF NOT EXISTS dim_municipio_geom_gist ON gold.dim_municipio USING GIST (geom);
 
--- Dimensión tiempo, grano año-mes. id_tiempo = AAAAMM (p. ej. 202011).
 CREATE TABLE IF NOT EXISTS gold.dim_tiempo (
-    id_tiempo   INTEGER    PRIMARY KEY,
-    anio        SMALLINT   NOT NULL,
-    mes         SMALLINT   NOT NULL CHECK (mes BETWEEN 1 AND 12),
-    trimestre   SMALLINT   NOT NULL CHECK (trimestre BETWEEN 1 AND 4),
-    nombre_mes  TEXT       NOT NULL,
-    CHECK (id_tiempo = anio * 100 + mes)
+    anio      SMALLINT  PRIMARY KEY,
+    sexenio   TEXT      NOT NULL
 );
 
--- Dimensión actividad: una fila por clase SCIAN + versión, con la jerarquía aplanada.
--- Los sectores 31-33 y 48-49 son rangos, igual que en silver.
-CREATE TABLE IF NOT EXISTS gold.dim_actividad (
-    id_actividad      SERIAL       PRIMARY KEY,
-    codigo_clase      CHAR(6)      NOT NULL,
-    desc_clase        TEXT         NOT NULL,
-    version_scian     TEXT         NOT NULL,
-    codigo_rama       CHAR(4)      NOT NULL,
-    desc_rama         TEXT         NOT NULL,
-    codigo_subsector  CHAR(3)      NOT NULL,
-    desc_subsector    TEXT         NOT NULL,
-    codigo_sector     VARCHAR(5)   NOT NULL,
-    desc_sector       TEXT         NOT NULL,
-    es_retail         BOOLEAN      NOT NULL,  -- sector 46
-    es_servicio       BOOLEAN      NOT NULL,  -- sectores 51 a 81
-    UNIQUE (codigo_clase, version_scian)
+CREATE TABLE IF NOT EXISTS gold.dim_indicador (
+    id_indicador  TEXT      PRIMARY KEY,
+    nombre        TEXT      NOT NULL,
+    dimension     TEXT      NOT NULL CHECK (dimension IN ('acceso', 'uso', 'valor', 'brecha')),
+    unidad        TEXT      NOT NULL,
+    universo      TEXT      NOT NULL,
+    fuente        TEXT      NOT NULL,
+    descripcion   TEXT      NOT NULL,
+    orden         SMALLINT  NOT NULL
 );
 
--- Dimensión delito
-CREATE TABLE IF NOT EXISTS gold.dim_delito (
-    id_delito       SERIAL   PRIMARY KEY,
-    bien_juridico   TEXT     NOT NULL,
-    tipo_delito     TEXT     NOT NULL,
-    subtipo_delito  TEXT     NOT NULL,
-    modalidad       TEXT     NOT NULL,
-    UNIQUE (bien_juridico, tipo_delito, subtipo_delito, modalidad)
+CREATE TABLE IF NOT EXISTS gold.dim_pais (
+    cod_pais  TEXT  PRIMARY KEY,
+    nombre    TEXT  NOT NULL
 );
 
--- Hecho censo: grano municipio (Censo 2020)
-CREATE TABLE IF NOT EXISTS gold.fact_censo (
-    cvegeo     CHAR(5)   PRIMARY KEY REFERENCES gold.dim_municipio (cvegeo),
-    pobtot     INTEGER,
-    p_12ymas   INTEGER,
-    pea        INTEGER,
-    pe_inac    INTEGER,
-    pob0_14    INTEGER,
-    pob15_64   INTEGER,
-    pob65_mas  INTEGER,
-    vivtot     INTEGER,
-    tvivhab    INTEGER,
-    -- Trazabilidad: fuente y versión copiadas de silver; fecha_carga y run_id de la corrida de gold
-    fuente          TEXT          NOT NULL,
-    version_fuente  TEXT          NOT NULL,
-    fecha_carga     TIMESTAMPTZ   NOT NULL,
-    run_id          UUID          NOT NULL
+-- Estimaciones de la ENDUTIH: anio × entidad × indicador × grupo de edad.
+-- Error estándar por linealización de Taylor con el diseño muestral (estrato est_dis, UPM upm_dis).
+CREATE TABLE IF NOT EXISTS gold.fact_encuesta_tic (
+    anio                 SMALLINT          NOT NULL REFERENCES gold.dim_tiempo (anio),
+    cve_ent              CHAR(2)           NOT NULL REFERENCES gold.dim_entidad (cve_ent),
+    id_indicador         TEXT              NOT NULL REFERENCES gold.dim_indicador (id_indicador),
+    grupo_edad           TEXT              NOT NULL CHECK (grupo_edad IN ('total', '16_74')),
+    estimacion           DOUBLE PRECISION  NOT NULL,   -- porcentaje (0-100)
+    error_estandar       DOUBLE PRECISION  NOT NULL,
+    cv                   DOUBLE PRECISION,             -- coeficiente de variación, en porcentaje
+    li_90                DOUBLE PRECISION  NOT NULL,
+    ls_90                DOUBLE PRECISION  NOT NULL,
+    calidad              TEXT              NOT NULL CHECK (calidad IN ('alta', 'moderada', 'baja')),
+    n_muestra            INTEGER           NOT NULL,   -- registros en el denominador
+    numerador_expandido  BIGINT            NOT NULL,
+    universo_expandido   BIGINT            NOT NULL,
+    fuente               TEXT              NOT NULL,
+    version_fuente       TEXT              NOT NULL,
+    fecha_carga          TIMESTAMPTZ       NOT NULL,
+    run_id               UUID              NOT NULL,
+    PRIMARY KEY (anio, cve_ent, id_indicador, grupo_edad)
 );
 
--- Hecho establecimiento: grano establecimiento × edición DENUE.
--- Snapshot periódico: NO se suma entre ediciones.
-CREATE TABLE IF NOT EXISTS gold.fact_establecimiento (
-    id_denue      BIGINT                   NOT NULL,
-    edicion       CHAR(7)                  NOT NULL,
-    cvegeo        CHAR(5)                  NOT NULL REFERENCES gold.dim_municipio (cvegeo),
-    id_actividad  INTEGER                  NOT NULL REFERENCES gold.dim_actividad (id_actividad),
-    id_tiempo     INTEGER                  NOT NULL REFERENCES gold.dim_tiempo (id_tiempo),  -- mes de la edición
-    per_ocu       TEXT,
-    geom          geometry(Point, 6372)    NOT NULL,
-    fuente          TEXT          NOT NULL,
-    version_fuente  TEXT          NOT NULL,
-    fecha_carga     TIMESTAMPTZ   NOT NULL,
-    run_id          UUID          NOT NULL,
-    PRIMARY KEY (id_denue, edicion)
-);
-CREATE INDEX IF NOT EXISTS fact_establecimiento_geom_gist ON gold.fact_establecimiento USING GIST (geom);
-CREATE INDEX IF NOT EXISTS fact_establecimiento_cvegeo_idx ON gold.fact_establecimiento (cvegeo);
-
--- Hecho incidencia: grano municipio × mes × delito
-CREATE TABLE IF NOT EXISTS gold.fact_incidencia (
-    cvegeo      CHAR(5)   NOT NULL REFERENCES gold.dim_municipio (cvegeo),
-    id_tiempo   INTEGER   NOT NULL REFERENCES gold.dim_tiempo (id_tiempo),
-    id_delito   INTEGER   NOT NULL REFERENCES gold.dim_delito (id_delito),
-    incidentes  INTEGER   NOT NULL CHECK (incidentes >= 0),
-    fuente          TEXT          NOT NULL,
-    version_fuente  TEXT          NOT NULL,
-    fecha_carga     TIMESTAMPTZ   NOT NULL,
-    run_id          UUID          NOT NULL,
-    PRIMARY KEY (cvegeo, id_tiempo, id_delito)
+CREATE TABLE IF NOT EXISTS gold.fact_valor_entidad (
+    anio            SMALLINT          NOT NULL REFERENCES gold.dim_tiempo (anio),
+    cve_ent         CHAR(2)           NOT NULL REFERENCES gold.dim_entidad (cve_ent),
+    concepto        TEXT              NOT NULL,
+    precios         TEXT              NOT NULL,
+    valor_mdp       DOUBLE PRECISION  NOT NULL,
+    estatus_cifra   TEXT              NOT NULL,
+    fuente          TEXT              NOT NULL,
+    version_fuente  TEXT              NOT NULL,
+    fecha_carga     TIMESTAMPTZ       NOT NULL,
+    run_id          UUID              NOT NULL,
+    PRIMARY KEY (anio, cve_ent, concepto, precios)
 );
 
--- Pares de municipios contiguos (contigüidad Queen, ST_Intersects; ver sql/gold/gold.sql). Cada par va en ambas direcciones.
-CREATE TABLE IF NOT EXISTS gold.vecinos_municipio (
-    cvegeo         CHAR(5)   NOT NULL REFERENCES gold.dim_municipio (cvegeo),
-    cvegeo_vecino  CHAR(5)   NOT NULL REFERENCES gold.dim_municipio (cvegeo),
-    PRIMARY KEY (cvegeo, cvegeo_vecino),
-    CHECK (cvegeo <> cvegeo_vecino)
+CREATE TABLE IF NOT EXISTS gold.fact_comercio_electronico (
+    anio            SMALLINT          NOT NULL REFERENCES gold.dim_tiempo (anio),
+    componente      TEXT              NOT NULL,
+    medida          TEXT              NOT NULL,
+    valor           DOUBLE PRECISION  NOT NULL,
+    estatus_cifra   TEXT              NOT NULL,
+    fuente          TEXT              NOT NULL,
+    version_fuente  TEXT              NOT NULL,
+    fecha_carga     TIMESTAMPTZ       NOT NULL,
+    run_id          UUID              NOT NULL,
+    PRIMARY KEY (anio, componente, medida)
 );
 
--- Resultados del análisis (los llena src/gold_analytics.py)
-CREATE TABLE IF NOT EXISTS gold.resultado_correlacion (
-    anio         SMALLINT           NOT NULL,
-    variable_x   TEXT               NOT NULL,
-    variable_y   TEXT               NOT NULL,
-    metodo       TEXT               NOT NULL CHECK (metodo IN ('pearson', 'spearman')),
-    coeficiente  DOUBLE PRECISION,
-    p_value      DOUBLE PRECISION,
-    n            INTEGER            NOT NULL,
-    PRIMARY KEY (anio, variable_x, variable_y, metodo)
+CREATE TABLE IF NOT EXISTS gold.fact_oecd_tic (
+    anio            SMALLINT          NOT NULL REFERENCES gold.dim_tiempo (anio),
+    cod_pais        TEXT              NOT NULL REFERENCES gold.dim_pais (cod_pais),
+    medida          TEXT              NOT NULL,
+    desc_medida     TEXT              NOT NULL,
+    unidad          TEXT              NOT NULL,
+    valor           DOUBLE PRECISION  NOT NULL,
+    estatus_obs     TEXT,
+    fuente          TEXT              NOT NULL,
+    version_fuente  TEXT              NOT NULL,
+    fecha_carga     TIMESTAMPTZ       NOT NULL,
+    run_id          UUID              NOT NULL,
+    PRIMARY KEY (anio, cod_pais, medida)
 );
 
-CREATE TABLE IF NOT EXISTS gold.resultado_moran_global (
-    anio         SMALLINT           NOT NULL,
-    indicador    TEXT               NOT NULL,
-    i            DOUBLE PRECISION   NOT NULL,
-    esperanza_i  DOUBLE PRECISION   NOT NULL,
-    z            DOUBLE PRECISION   NOT NULL,  -- z_sim (permutaciones)
-    p_sim        DOUBLE PRECISION   NOT NULL,
-    PRIMARY KEY (anio, indicador)
+-- Resultados de src/gold_analytics.py
+CREATE TABLE IF NOT EXISTS gold.resultado_brecha (
+    anio            SMALLINT          NOT NULL,
+    id_indicador    TEXT              NOT NULL,
+    entidad_a       CHAR(2)           NOT NULL,
+    entidad_b       CHAR(2)           NOT NULL,
+    diferencia_pp   DOUBLE PRECISION  NOT NULL,   -- a - b, puntos porcentuales
+    error_estandar  DOUBLE PRECISION  NOT NULL,
+    z               DOUBLE PRECISION,
+    p_value         DOUBLE PRECISION,
+    significativa   BOOLEAN           NOT NULL,   -- p < 0.10 (nivel de confianza de INEGI: 90 por ciento)
+    PRIMARY KEY (anio, id_indicador, entidad_a, entidad_b)
 );
 
-CREATE TABLE IF NOT EXISTS gold.resultado_lisa (
-    anio       SMALLINT           NOT NULL,
-    indicador  TEXT               NOT NULL,
-    cvegeo     CHAR(5)            NOT NULL,
-    ii         DOUBLE PRECISION   NOT NULL,
-    p_sim      DOUBLE PRECISION   NOT NULL,
-    cuadrante  TEXT               NOT NULL CHECK (cuadrante IN ('HH', 'LL', 'HL', 'LH', 'no significativo')),
-    PRIMARY KEY (anio, indicador, cvegeo)
+CREATE TABLE IF NOT EXISTS gold.resultado_tendencia (
+    cve_ent              CHAR(2)           NOT NULL,
+    id_indicador         TEXT              NOT NULL,
+    anio_inicial         SMALLINT          NOT NULL,
+    anio_final           SMALLINT          NOT NULL,
+    valor_inicial        DOUBLE PRECISION  NOT NULL,
+    valor_final          DOUBLE PRECISION  NOT NULL,
+    cambio_pp            DOUBLE PRECISION  NOT NULL,
+    error_estandar       DOUBLE PRECISION  NOT NULL,
+    p_value              DOUBLE PRECISION,
+    significativo        BOOLEAN           NOT NULL,
+    pendiente_pp_anual   DOUBLE PRECISION  NOT NULL,   -- MCO sobre los años disponibles
+    PRIMARY KEY (cve_ent, id_indicador)
 );
 
-CREATE TABLE IF NOT EXISTS gold.resultado_moran_bivariado (
-    anio        SMALLINT           NOT NULL,
-    variable_x  TEXT               NOT NULL,
-    variable_y  TEXT               NOT NULL,
-    i           DOUBLE PRECISION   NOT NULL,
-    z           DOUBLE PRECISION   NOT NULL,  -- z_sim (permutaciones)
-    p_sim       DOUBLE PRECISION   NOT NULL,
-    PRIMARY KEY (anio, variable_x, variable_y)
+CREATE TABLE IF NOT EXISTS gold.resultado_ranking (
+    anio          SMALLINT          NOT NULL,
+    id_indicador  TEXT              NOT NULL,
+    cve_ent       CHAR(2)           NOT NULL,
+    estimacion    DOUBLE PRECISION  NOT NULL,
+    rango         SMALLINT          NOT NULL,   -- 1 = valor más alto de las 32 entidades
+    n_entidades   SMALLINT          NOT NULL,
+    PRIMARY KEY (anio, id_indicador, cve_ent)
 );
 
--- Bitácora del ETL de gold (conteos). No se trunca.
+CREATE TABLE IF NOT EXISTS gold.resultado_validacion_oecd (
+    anio            SMALLINT          NOT NULL,
+    medida_oecd     TEXT              NOT NULL,
+    id_indicador    TEXT              NOT NULL,
+    valor_oecd      DOUBLE PRECISION  NOT NULL,
+    valor_endutih   DOUBLE PRECISION  NOT NULL,
+    li_90           DOUBLE PRECISION  NOT NULL,
+    ls_90           DOUBLE PRECISION  NOT NULL,
+    diferencia_pp   DOUBLE PRECISION  NOT NULL,
+    dentro_ic       BOOLEAN           NOT NULL,
+    PRIMARY KEY (anio, medida_oecd)
+);
+
 CREATE TABLE IF NOT EXISTS gold.etl_log (
     id           BIGSERIAL     PRIMARY KEY,
     run_id       UUID          NOT NULL,

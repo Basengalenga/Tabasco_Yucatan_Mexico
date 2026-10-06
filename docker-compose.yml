@@ -1,27 +1,29 @@
+name: economia_digital
+
 services:
   db:
-    image: postgis/postgis:16-3.4
-    container_name: yucatan_dw
+    image: postgres:16
+    container_name: ed_dw
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin123
-      POSTGRES_DB: yucatan_dw
+      POSTGRES_DB: economia_digital_dw
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./sql:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d yucatan_dw"]
+      test: ["CMD-SHELL", "pg_isready -U admin -d economia_digital_dw"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   api:
     build: ./api
-    container_name: yucatan_api
+    container_name: ed_api
     environment:
-      DB_URL: postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw
+      DB_URL: postgresql+psycopg2://admin:admin123@db:5432/economia_digital_dw
     depends_on:
       db:
         condition: service_healthy
@@ -33,7 +35,7 @@ services:
 
   dashboard:
     build: ./dashboard
-    container_name: yucatan_dashboard
+    container_name: ed_dashboard
     environment:
       API_URL: http://api:8000
     ports:
@@ -44,7 +46,7 @@ services:
 
   airflow-db:
     image: postgres:16
-    container_name: yucatan_airflow_db
+    container_name: ed_airflow_db
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin123
@@ -61,12 +63,13 @@ services:
     build:
       context: .
       dockerfile: airflow/Dockerfile
-    container_name: yucatan_airflow
+    container_name: ed_airflow
     command: standalone
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://admin:admin123@airflow-db:5432/airflow
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       _AIRFLOW_DB_MIGRATE: "true"
       _AIRFLOW_WWW_USER_CREATE: "true"
       _AIRFLOW_WWW_USER_USERNAME: admin

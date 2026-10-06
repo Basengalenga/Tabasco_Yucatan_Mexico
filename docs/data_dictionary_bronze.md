@@ -1,178 +1,101 @@
 # Data dictionary — bronze layer
 
-Raw copy of each source, loaded by `src/extractor_to_bronze.py`. Other layers:
-[silver](data_dictionary_silver.md) · [gold](data_dictionary_gold.md).
+Raw copy of each official source, loaded by `src/extractor_to_bronze.py`. Other layers:
+[silver](data_dictionary_silver.md) · [gold](data_dictionary_gold.md). Every cleaning decision
+applied later is documented in [`decisiones_limpieza.md`](decisiones_limpieza.md).
 
 **Bronze rules**
 
-- Every source column is stored as `TEXT`, exactly as it comes (no cleaning, no type
-  casting). The only filter is state `31` (Yucatán) in the crime file, which covers all of
-  Mexico.
-- Column names are normalized to snake_case without accents
-  (`Bien jurídico afectado` → `bien_juridico_afectado`).
-- Each run replaces the whole table (inside a transaction).
-- Tables are created by the extractor (`to_sql` / `to_postgis`), not by `sql/init.sql`.
+- All source columns stored as `TEXT`, unmodified. Column names normalized to snake_case
+  without accents (`2023<R>` → `2023_r`, `REF_AREA: Reference area` → `ref_area`).
+- Each run replaces the tables (inside a transaction; a failed download never leaves a table
+  half-loaded).
+- The only byte-level change: CRLF → LF line endings before `COPY` (D05); no value changes.
 
-**Metadata columns (all bronze tables)**
+**Lineage columns (all tables)**
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `_ingested_at` | TIMESTAMPTZ | Start of the batch (UTC); the same for all tables of one run. In Airflow, the DAG run's `logical_date` |
-| `_source_url` | TEXT | Exact URL the file was downloaded from |
-| `_run_id` | TEXT | UUID of the run; shared by the 5 extractors of one Airflow DAG run |
-
-This dictionary details the columns that the silver layer reads. The remaining source
-columns are listed by name; their official definitions are in the data descriptor that
-each source publishes with the download.
+| `_ingested_at` | TIMESTAMPTZ | Start of the batch (Airflow `logical_date`), same for all tables |
+| `_source_url` | TEXT | Exact download URL |
+| `_run_id` | TEXT | UUID of the run (uuid5 of the Airflow DAG run) |
+| `_archivo` | TEXT | File inside the ZIP (ENDUTIH and dictionaries) |
 
 ---
 
-## `bronze.incidencia_delictiva`
+## INEGI ENDUTIH — microdata (access and use indicators)
 
-| | |
+Encuesta Nacional sobre Disponibilidad y Uso de Tecnologías de la Información en los Hogares,
+open data, 2020–2024. One table per file and year, with **exactly the columns of that year's file**
+(question numbering changes between years; see D06).
+
+| Table | Source file | Grain | Rows (2020 / 2024) | Columns |
+| --- | --- | --- | --- | --- |
+| `endutih_hogares_<anio>` | `tr_endutih_hogar(es)_anual_<anio>.csv` | household | 58,154 / 58,080 | 84–104 |
+| `endutih_usuarios_<anio>` | `tr_endutih_usuario(s)_anual_<anio>.csv` | selected person 6+ (one per household) | 58,154 / 58,080 | 226–231 |
+| `endutih_usuarios2_<anio>` | `tr_endutih_usuario(s)2_anual_<anio>.csv` | same person, mobile-phone module | 58,154 / 58,080 | 80–95 |
+| `endutih_diccionario` | `diccionario_de_datos_*.csv` | column × table × year | 2,065 | — |
+| `endutih_cat_entidad` | `catalogo/tc_endutih_entidad.csv` (2024 ZIP) | state | 32 | — |
+
+Columns used downstream (names as in the files):
+
+| Column | Meaning |
 | --- | --- |
-| Source | SESNSP, municipal crime incidence, common jurisdiction (`IDM_NM_dic25.csv`) |
-| URL | `https://repodatos.atdt.gob.mx/api_update/sesnsp/incidencia_delictiva/IDM_NM_dic25.csv` |
-| Grain | municipality × year × legal good × crime type × subtype × modality, one column per month |
-| Rows | 114,268 (years 2015–2025) |
-| Filter | `clave_ent = '31'` |
+| `upm`, `viv_sel`, `hogar`, `num_ren` | Household / person keys |
+| `ent` (2020–2023), `cve_ent` (2024) | State code |
+| `est_dis`, `upm_dis` | Design stratum and primary sampling unit (for standard errors) |
+| `fac_hog`, `fac_per` | Expansion factors (households / persons) |
+| `tloc`, `edad`, `sexo` | Locality size, age, sex |
+| `p4_*` | Household equipment and connection (see `silver.endutih_mapeo_variables`) |
+| `p6_1`, `p7_*`, `p8_*` | Computer, internet and mobile-phone use |
 
-| Column | Description | Used in silver |
-| --- | --- | --- |
-| `ano` | Year | ✔ → `anio` |
-| `clave_ent` | State code (`31`) | filter only |
-| `entidad` | State name | |
-| `cve_municipio` | 5-digit municipal code (state + municipality), equal to INEGI `cvegeo` | ✔ → `cvegeo` |
-| `municipio` | Municipality name | ✔ checked against the crosswalk |
-| `bien_juridico_afectado` | Legal good affected (top level of the crime classification) | ✔ |
-| `tipo_de_delito` | Crime type | ✔ |
-| `subtipo_de_delito` | Crime subtype | ✔ |
-| `modalidad` | Modality (e.g. with/without violence) | ✔ |
-| `enero` … `diciembre` | Number of reported incidents in each month (12 columns) | ✔ unpivoted to `mes` + `incidentes` |
+Source: `https://www.inegi.org.mx/contenidos/programas/{dutih|endutih}/<anio>/datosabiertos/conjunto_de_datos_endutih_<anio>_csv.zip`.
 
----
+## INEGI — Valor Agregado Bruto del Comercio Electrónico (value indicator)
 
-## `bronze.iter_2020`
+### `bronze.vabcoel`
 
-| | |
+Satellite estimate of the national accounts (SCNM, base 2018), national only, 2013–2024.
+**Rows:** 43 (7 tabulations). Wide: one row per descriptor, one column per year.
+
+| Column | Description |
 | --- | --- |
-| Source | INEGI, Population and Housing Census 2020, *Principales resultados por localidad* (ITER), Yucatán |
-| URL | `https://www.inegi.org.mx/contenidos/programas/ccpv/2020/datosabiertos/iter/iter_31_cpv2020_csv.zip` |
-| Grain | locality, plus total rows: state (`mun = '000'`), municipality (`loc = '0000'`), and grouped small localities (`loc = '9998'`, `'9999'`) |
-| Rows | 2,691 (289 columns) |
+| `descriptores` | `unit|concept|component<note>`, e.g. `Millones de pesos a precios corrientes|Valor agregado bruto|Comercio al por mayor` |
+| `2013` … `2022`, `2023_r`, `2024_p` | Value per year (`_r` revised, `_p` preliminary); `NA` = not applicable |
+| `archivo` | Tabulation file (corrientes, constantes, índice de precios, distribución, participaciones) |
+| `titulo` | Title from `indice.csv` |
 
-Columns used by silver (only rows with `loc = '0000'`):
+Source: `https://www.inegi.org.mx/contenidos/programas/vabcoel/2018/datosabiertos/conjunto_de_datos_vabcoel2018_csv.zip`.
 
-| Column | Description | Used in silver |
-| --- | --- | --- |
-| `entidad` | State code (`31`) | filter |
-| `mun` | 3-digit municipal code (`000` = state total) | ✔ → `cvegeo` |
-| `nom_mun` | Municipality name | ✔ crosswalk |
-| `loc` | 4-digit locality code (`0000` = municipal total) | filter |
-| `pobtot` | Total population | ✔ |
-| `p_12ymas` | Population aged 12 and over | ✔ |
-| `pea` | Economically active population (aged 12 and over) | ✔ |
-| `pe_inac` | Economically inactive population (aged 12 and over) | ✔ |
-| `pob0_14` | Population aged 0–14 | ✔ |
-| `pob15_64` | Population aged 15–64 | ✔ |
-| `pob65_mas` | Population aged 65 and over | ✔ |
-| `vivtot` | Total dwellings | ✔ |
-| `tvivhab` | Total inhabited dwellings | ✔ |
+## INEGI — PIB por entidad federativa (value indicator by state)
 
-Values `*` (confidential) and `N/D` (not available) are kept as text in bronze.
+### `bronze.pibe`
 
-Other columns (not used), by group:
+Gross value added by state, base 2018, 2003–2023 (2022 revised, 2023 preliminary). Only 3 of the
+79 tabulations (D03). **Rows:** 1,089 = 3 files × 11 presentations × 33 areas.
 
-- **Identification and location:** `nom_ent`, `nom_loc`, `longitud`, `latitud`, `altitud`, `tamloc`.
-- **Population by sex and age:** `pobfem`, `pobmas`, `p_0a2` … `p_85ymas` and their `_f` / `_m` variants, `p_60ymas*`, `p_15a49_f`, `rel_h_m`, `prom_hnv`.
-- **Migration:** `pnacent*`, `pnacoe*`, `pres2015*`, `presoe15*`.
-- **Indigenous language and Afro-descendant population:** `p3ym_hli*`, `p3hlinhe*`, `p3hli_he*`, `p5_hli*`, `phog_ind`, `pob_afro*`.
-- **Disability and limitation:** `pcon_disc`, `pcdisc_*`, `pcon_limi`, `pclim_*`, `psind_lim`.
-- **Education:** `p3a5_noa*`, `p6a11_noa*`, `p12a14noa*`, `p15a17a*`, `p18a24a*`, `p8a14an*`, `p15ym_an*`, `p15ym_se*`, `p15pri_*`, `p15sec_*`, `p18ym_pb*`, `graproes*`.
-- **Economic activity (sex breakdown):** `pea_f`, `pea_m`, `pe_inac_f`, `pe_inac_m`, `pocupada*`, `pdesocup*`.
-- **Health services:** `psinder`, `pder_*`, `pafil_*`.
-- **Marital status and religion:** `p12ym_solt`, `p12ym_casa`, `p12ym_sepa`, `pcatolica`, `pro_crieva`, `potras_rel`, `psin_relig`.
-- **Households:** `tothog`, `hogjef_*`, `pobhog`, `phogjef_*`.
-- **Housing:** `tvivpar`, `vivpar_hab`, `vivparh_cv`, `tvivparhab`, `vivpar_des`, `vivpar_ut`, `ocupvivpar`, `prom_ocup`, `pro_ocup_c`, and the 40 `vph_*` dwelling-characteristic columns (floor, rooms, electricity, water, drainage, appliances, ICT).
-
----
-
-## `bronze.denue`
-
-| | |
+| Column | Description |
 | --- | --- |
-| Source | INEGI, National Statistical Directory of Economic Units (DENUE), Yucatán |
-| URLs | `https://www.inegi.org.mx/contenidos/masiva/denue/<edition>/denue_31_<MMYY>_csv.zip` for editions 2020_11, 2021_11, 2022_11, 2023_11, 2024_11 and 2025_05 |
-| Grain | establishment × edition (all editions stacked in one table) |
-| Rows | 809,101 (48 columns) |
+| `descriptores` | `presentation|B.1bV---Valor agregado bruto|<state><C1>` |
+| `2003` … `2021`, `2022_r`, `2023_p` | Value per year |
+| `archivo` | `..._b.1bv2023_p.csv` (total GVA), `..._512023_p.csv` (sector 51, information in mass media), `..._212023_p.csv` (sector 21, mining) |
 
-| Column | Description | Used in silver |
-| --- | --- | --- |
-| `id` | DENUE establishment identifier | ✔ → `id_denue` |
-| `nom_estab` | Establishment name | ✔ |
-| `codigo_act` | 6-digit SCIAN class code | ✔ |
-| `nombre_act` | SCIAN class name | ✔ |
-| `per_ocu` | Employee-size band (e.g. `0 a 5 personas`) | ✔ |
-| `cve_mun` | 3-digit municipal code as reported by DENUE | ✔ → `cve_mun_original` |
-| `municipio` | Municipality name | ✔ crosswalk |
-| `latitud` | Latitude (decimal degrees, ITRF2008 / EPSG:6365) | ✔ |
-| `longitud` | Longitude (decimal degrees, ITRF2008 / EPSG:6365) | ✔ |
-| `fecha_alta` | Month the establishment was added to DENUE (`YYYY-MM`, some rows `YYYY MM`) | ✔ |
-| `edicion` | **Added by the extractor.** Edition (`2020_11` … `2025_05`) | ✔ |
-| `anio` | **Added by the extractor.** Year of the edition | |
-| `scian` | **Added by the extractor.** SCIAN version of the edition: `SCIAN 2018` (2020_11–2023_11) or `SCIAN 2023` (2024_11 onward) | ✔ → `version_scian` |
+Source: `https://www.inegi.org.mx/contenidos/programas/pibent/2018/datosabiertos/pibe_datos_abiertos_csv.zip`.
 
-Other columns (not used):
+## OECD — ICT Access and Usage by Households and Individuals (international context)
 
-- **Business identity:** `raz_social` (legal name), `clee` (economic-unit key; absent in edition 2020_11, so NULL there), `tipounieco` (`Fijo` / `Semifijo`).
-- **Address:** `tipo_vial`, `nom_vial`, `tipo_v_e_1` … `nom_v_e_3`, `numero_ext`, `letra_ext`, `edificio`, `edificio_e`, `numero_int`, `letra_int`, `tipo_asent`, `nomb_asent`, `tipocencom`, `nom_cencom`, `num_local`, `cod_postal`.
-- **Geographic codes:** `cve_ent`, `entidad`, `cve_loc`, `localidad`, `ageb`, `manzana`.
-- **Contact:** `telefono`, `correoelec`, `www`.
+### `bronze.oecd_ict_hogares` · `bronze.oecd_ict_individuos`
 
-If an edition lacks a column that another edition has, it is NULL for that edition.
+SDMX-CSV with labels, filtered to national totals (D04). **Rows:** 1,105 / 2,551, 44 countries
+and aggregates, 2015–2025.
 
----
-
-## `bronze.marco_geo_municipal`
-
-| | |
+| Column | Description |
 | --- | --- |
-| Source | INEGI Marco Geoestadístico 2020, municipal layer (`*mun.shp` inside the zip) |
-| URL | `https://www.inegi.org.mx/contenidos/productos/prod_serv/contenidos/espanol/bvinegi/productos/geografia/marcogeo/889463807469/31_yucatan.zip` |
-| Grain | municipality (polygon) |
-| Rows | 106 |
-| CRS | EPSG:6372 (Mexico ITRF2008 / LCC). The `.prj` names it `MEXICO_ITRF_2008_LCC`; the extractor tags the SRID as 6372 without moving coordinates |
+| `ref_area` | `MEX: Mexico` |
+| `measure` | `B1_HH: Households with internet access at home`, `C5B_I: Individuals using the internet - last 3 m`, ... |
+| `unit_measure` | `PT_HH: Percentage of households` / `PT_POP: Percentage of population` |
+| `age`, `sex`, `education_level`, `income_group`, `emp_status`, `geo_area` | Breakdown dimensions (all totals; age 16–74 for individuals) |
+| `time_period`, `obs_value` | Year and value |
+| `obs_status` | `A: Normal value`, `B: Time series break`, `D: Definition differs`, `U: Low reliability` |
 
-| Column | Type | Description | Used in silver |
-| --- | --- | --- | --- |
-| `cvegeo` | TEXT | 5-digit geostatistical key (`cve_ent` + `cve_mun`) | ✔ validated |
-| `cve_ent` | TEXT | State code (`31`) | ✔ |
-| `cve_mun` | TEXT | 3-digit municipal code | ✔ |
-| `nomgeo` | TEXT | Municipality name | ✔ → `nombre_municipio` |
-| `geometry` | geometry (Polygon / MultiPolygon, 6372) | Municipal boundary (103 Polygon, 3 MultiPolygon) | ✔ |
-
----
-
-## `bronze.scian`
-
-| | |
-| --- | --- |
-| Source | INEGI, North American Industry Classification System (SCIAN) México 2018 and 2023, *categorías y productos* workbook |
-| URLs | `https://www.inegi.org.mx/contenidos/app/scian/scian_2018_categorias_y_productos.xlsx`, `…/scian_2023_categorias_y_productos.xlsx` |
-| Grain | code × level (sheet) × version |
-| Rows | 73,499 |
-
-| Column | Description | Used in silver |
-| --- | --- | --- |
-| `codigo` | SCIAN code (2 digits sector, or range `31-33` / `48-49`; 3 subsector; 4 rama; 5 subrama; 6 clase). NULL on product-index rows of the CLASE sheet | ✔ |
-| `titulo` | Category title | ✔ → `descripcion` |
-| `descripcion` | Long description of the category | |
-| `incluye` | What the category includes | |
-| `excluye` | What the category excludes | |
-| `productos` | Products (CLASE sheet) | |
-| `indice_de_bienes_y_servicios_comprendidos_en_las_categorias_del` | Index of goods and services (CLASE sheet) | |
-| `hoja` | **Added by the extractor.** Level / sheet name: `SECTOR`, `SUBSECTOR`, `RAMA`, `SUBRAMA`, `CLASE` | ✔ → `nivel` |
-| `scian` | **Added by the extractor.** Version: `SCIAN 2018` or `SCIAN 2023` | ✔ → `version_scian` |
-
-Fully empty spreadsheet rows are dropped; product-index rows without a code are kept
-(silver filters them).
+Source: `https://sdmx.oecd.org/public/rest/data/OECD.STI.DEP,DSD_ICT_HH_IND@DF_HH|DF_IND,/...` (exact keys in the extractor).

@@ -1,82 +1,109 @@
 """
-Extracción y carga a la capa bronze de yucatan_dw.
+Extracción y carga a la capa bronze de economia_digital_dw.
 
-Cada extracción es una función independiente que descarga su fuente y la
-carga a su propia tabla dentro del esquema `bronze`:
+Cada extracción es una función independiente que descarga su fuente oficial y la
+carga al esquema `bronze`:
 
-    bronze.incidencia_delictiva  <- SESNSP (solo Yucatán, clave 31)
-    bronze.iter_2020             <- INEGI ITER 2020, Yucatán
-    bronze.denue                 <- INEGI DENUE, ediciones 2020-2025
-    bronze.marco_geo_municipal   <- INEGI Marco Geoestadístico, municipios
-    bronze.scian                 <- INEGI catálogo SCIAN 2018 y 2023
+    bronze.endutih_{hogares|usuarios|usuarios2}_<anio>  <- INEGI ENDUTIH 2020-2024, microdatos
+    bronze.endutih_diccionario                           <- INEGI ENDUTIH, diccionarios de datos
+    bronze.endutih_cat_entidad                           <- INEGI ENDUTIH 2024, catálogo de entidades
+    bronze.vabcoel                                       <- INEGI, Valor Agregado Bruto del
+                                                            Comercio Electrónico (cuentas nacionales)
+    bronze.pibe                                          <- INEGI, PIB por entidad federativa
+                                                            (VAB total, sector 51 y sector 21)
+    bronze.oecd_ict_hogares / bronze.oecd_ict_individuos <- OECD ICT Access and Usage (SDMX)
 
 Reglas de bronze:
-    - Todas las columnas de la fuente se guardan como TEXT.
+    - Todas las columnas de la fuente se guardan como TEXT, sin limpiar ni transformar.
     - Nombres de columna normalizados a snake_case sin acentos.
-    - Los datos se cargan tal como vienen (sin limpiar ni transformar).
-    - Metadatos agregados: _ingested_at, _source_url, _run_id.
-      _ingested_at es el inicio del lote (igual para las 5 tablas), no la hora
-      en que se escribió cada tabla. En Airflow es el logical_date del DAG run.
+    - Metadatos agregados: _ingested_at, _source_url, _run_id (y _archivo cuando la fuente
+      es un ZIP con varios archivos). _ingested_at es el inicio del lote, igual para todas
+      las tablas; en Airflow es el logical_date del DAG run.
+
+Microdatos de la ENDUTIH:
+    Cada archivo se carga a su propia tabla, con las columnas exactas de ese año (la
+    numeración de las preguntas cambia entre levantamientos). Se cargan con COPY directo
+    desde el ZIP, sin pasar por pandas: ~290 mil registros × ~230 columnas por tabla no
+    caben cómodos en memoria como DataFrame de texto. Las columnas de metadatos llevan su
+    valor como DEFAULT de la tabla, así COPY no tiene que tocar las filas.
 
 Manejo de errores (fail-fast):
-    Si cualquier descarga o carga falla, se detiene todo el script con error.
-    Dentro de cada función primero se descarga todo y solo después se toca la
-    tabla, así una descarga fallida nunca deja una tabla incompleta.
+    Dentro de cada función primero se descarga todo y solo después se toca la base, en
+    una transacción. Una descarga fallida nunca deja una tabla incompleta.
 
-Requisito: el esquema `bronze` ya existe (se crea en el init de ./sql).
+Requisito: el esquema `bronze` ya existe (se crea en sql/init.sql).
 """
 
+import csv
+import hashlib
 import io
+import os
 import re
-import tempfile
 import unicodedata
 import uuid
 import zipfile
 from datetime import datetime, timezone
 
-import geopandas as gpd
 import pandas as pd
 import requests
-from curl_cffi import requests as cffi_requests
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.types import Text
 
 # --------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------
-DB_URL = "postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw"
+DB_URL = os.environ.get("DB_URL", "postgresql+psycopg2://admin:admin123@db:5432/economia_digital_dw")
 SCHEMA = "bronze"
 
-CLAVE_YUCATAN = "31"
+INEGI = "https://www.inegi.org.mx/contenidos/programas"
 
-URL_INCIDENCIA = "https://repodatos.atdt.gob.mx/api_update/sesnsp/incidencia_delictiva/IDM_NM_dic25.csv"
-URL_ITER = "https://www.inegi.org.mx/contenidos/programas/ccpv/2020/datosabiertos/iter/iter_31_cpv2020_csv.zip"
-URL_MARCO_GEO = "https://www.inegi.org.mx/contenidos/productos/prod_serv/contenidos/espanol/bvinegi/productos/geografia/marcogeo/889463807469/31_yucatan.zip"
-
-BASE_DENUE = "https://www.inegi.org.mx/contenidos/masiva/denue"
-EDICIONES_DENUE = {
-    "2020_11": f"{BASE_DENUE}/2020_11/denue_31_1120_csv.zip",
-    "2021_11": f"{BASE_DENUE}/2021_11/denue_31_1121_csv.zip",
-    "2022_11": f"{BASE_DENUE}/2022_11/denue_31_1122_csv.zip",
-    "2023_11": f"{BASE_DENUE}/2023_11/denue_31_1123_csv.zip",
-    "2024_11": f"{BASE_DENUE}/2024_11/denue_31_1124_csv.zip",
-    "2025_05": f"{BASE_DENUE}/2025_05/denue_31_0525_csv.zip",
+# ENDUTIH: hasta 2022 el programa vive en /dutih/; desde 2023 en /endutih/.
+# 2019 se excluye a propósito: su archivo de datos abiertos no trae la clave de entidad
+# (ver docs/decisiones_limpieza.md, decisión D01).
+URLS_ENDUTIH = {
+    2020: f"{INEGI}/dutih/2020/datosabiertos/conjunto_de_datos_endutih_2020_csv.zip",
+    2021: f"{INEGI}/dutih/2021/datosabiertos/conjunto_de_datos_endutih_2021_csv.zip",
+    2022: f"{INEGI}/dutih/2022/datosabiertos/conjunto_de_datos_endutih_2022_csv.zip",
+    2023: f"{INEGI}/endutih/2023/datosabiertos/conjunto_de_datos_endutih_2023_csv.zip",
+    2024: f"{INEGI}/endutih/2024/datosabiertos/conjunto_de_datos_endutih_2024_csv.zip",
+}
+# Archivo de la fuente -> nombre de tabla. 2020 y 2021 usan singular (hogar, usuario);
+# desde 2022, plural. Solo se uniforma el nombre de la tabla; el archivo queda en _archivo.
+# No se cargan residentes ni viviendas: ningún indicador del proyecto los usa (decisión D02).
+PATRON_TABLAS_ENDUTIH = {
+    r"tr_endutih_hogar(es)?_anual": "hogares",
+    r"tr_endutih_usuario(s)?_anual": "usuarios",
+    r"tr_endutih_usuario(s)?2_anual": "usuarios2",
 }
 
-# El DENUE usa SCIAN 2018 (ediciones 2020-2023) y SCIAN 2023 (2024 en adelante)
-BASE_SCIAN = "https://www.inegi.org.mx/contenidos/app/scian"
-URLS_SCIAN = {
-    "SCIAN 2018": f"{BASE_SCIAN}/scian_2018_categorias_y_productos.xlsx",
-    "SCIAN 2023": f"{BASE_SCIAN}/scian_2023_categorias_y_productos.xlsx",
+URL_VABCOEL = f"{INEGI}/vabcoel/2018/datosabiertos/conjunto_de_datos_vabcoel2018_csv.zip"
+
+URL_PIBE = f"{INEGI}/pibent/2018/datosabiertos/pibe_datos_abiertos_csv.zip"
+# Del ZIP del PIB estatal (79 tabulados) solo se cargan los 3 que usa el proyecto (decisión D03)
+ARCHIVOS_PIBE = {
+    "conjunto_de_datos_pibe_actividad_b.1bv2023_p.csv": "vab_total",
+    "conjunto_de_datos_pibe_actividad_512023_p.csv": "vab_51",
+    "conjunto_de_datos_pibe_actividad_212023_p.csv": "vab_21",
 }
-HOJAS_SCIAN = ["SECTOR", "SUBSECTOR", "RAMA", "SUBRAMA", "CLASE"]
+
+# OECD SDMX: se pide solo el total nacional (sin desagregar por edad, sexo, ingreso...) de
+# las medidas que se usan; el flujo completo pesa ~180 MB (decisión D04).
+OECD_SDMX = "https://sdmx.oecd.org/public/rest/data/OECD.STI.DEP"
+URLS_OECD = {
+    "oecd_ict_hogares": f"{OECD_SDMX},DSD_ICT_HH_IND@DF_HH,/"
+                        ".A.A1_HH+B1_HH+B21A_HH+B21B_HH.PT_HH._T._Z._Z._Z._T._Z?startPeriod=2015",
+    "oecd_ict_individuos": f"{OECD_SDMX},DSD_ICT_HH_IND@DF_IND,/"
+                           ".A.C5B_I+C2B_I+G1_I+D1T_I+D1U_I+F1_I+D1B_I.PT_POP._Z.Y16T74._T._T._T._T"
+                           "?startPeriod=2015",
+}
+HEADERS_OECD = {"Accept": "application/vnd.sdmx.data+csv; charset=utf-8; labels=both"}
 
 
 # --------------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------------
 def normalizar_columna(nombre: str) -> str:
-    """'Bien jurídico afectado' -> 'bien_juridico_afectado'."""
+    """'Bien jurídico afectado' -> 'bien_juridico_afectado'; '2023<R>' -> '2023_r'."""
     sin_acentos = unicodedata.normalize("NFKD", nombre).encode("ascii", "ignore").decode("ascii")
     snake = re.sub(r"[^a-z0-9]+", "_", sin_acentos.lower())
     return snake.strip("_")
@@ -89,153 +116,174 @@ def normalizar_columnas(df: pd.DataFrame) -> pd.DataFrame:
 
 def agregar_metadatos(df: pd.DataFrame, source_url: str, run_id: str, ingested_at: datetime) -> pd.DataFrame:
     """Se agregan después de normalizar, porque la normalización quitaría el '_' inicial."""
-    df["_ingested_at"] = ingested_at  # timestamp con zona horaria (UTC)
+    df["_ingested_at"] = ingested_at
     df["_source_url"] = source_url
     df["_run_id"] = run_id
     return df
 
 
-def cargar_tabla(df: pd.DataFrame, tabla: str, engine) -> None:
-    """Carga un DataFrame o GeoDataFrame a bronze, con todas las columnas de la fuente como TEXT."""
-    dtype = {c: Text() for c in df.columns if c not in ("_ingested_at", "geometry")}
+# Opcional, solo para desarrollo: si CACHE_DESCARGAS apunta a una carpeta, cada descarga se
+# guarda ahí y se reutiliza (INEGI puede tardar varios minutos). En Airflow no se define.
+CACHE_DESCARGAS = os.environ.get("CACHE_DESCARGAS")
 
-    # DECISIÓN HUMANA (temporal): reemplazo completo de la tabla en cada ejecución.
-    # Se decidió así mientras se define la estrategia para re-ejecuciones
-    # (append, historial por _run_id, etc.). Revisar antes de pasar a Airflow.
-    # La carga corre dentro de una transacción: si falla, la tabla anterior no se pierde.
-    with engine.begin() as conn:
-        if isinstance(df, gpd.GeoDataFrame):
-            df.to_postgis(tabla, conn, schema=SCHEMA, if_exists="replace", index=False, dtype=dtype)
-        else:
-            df.to_sql(
-                tabla, conn, schema=SCHEMA, if_exists="replace", index=False,
-                dtype=dtype, chunksize=10_000, method="multi",
-            )
 
+def descargar(url: str, **kwargs) -> bytes:
+    cache = None
+    if CACHE_DESCARGAS:
+        cache = os.path.join(CACHE_DESCARGAS, hashlib.md5(url.encode()).hexdigest())
+        if os.path.exists(cache):
+            with open(cache, "rb") as f:
+                return f.read()
+    r = requests.get(url, timeout=600, **kwargs)
+    r.raise_for_status()
+    if cache:
+        with open(cache, "wb") as f:
+            f.write(r.content)
+    return r.content
+
+
+def abrir_zip(contenido: bytes, url: str) -> zipfile.ZipFile:
+    # INEGI responde 200 con una página HTML cuando el archivo no existe
+    if not contenido.startswith(b"PK"):
+        raise ValueError(f"La descarga no es un ZIP (¿cambió la URL?): {url}")
+    return zipfile.ZipFile(io.BytesIO(contenido))
+
+
+def leer_csv_texto(raw: bytes) -> str:
+    """Los CSV de INEGI vienen en UTF-8 (algunos con BOM); latin-1 queda como respaldo."""
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def cargar_tabla(df: pd.DataFrame, tabla: str, conn) -> None:
+    """Carga un DataFrame a bronze, reemplazando la tabla, con las columnas de la fuente como TEXT."""
+    dtype = {c: Text() for c in df.columns if c != "_ingested_at"}
+    df.to_sql(tabla, conn, schema=SCHEMA, if_exists="replace", index=False,
+              dtype=dtype, chunksize=10_000, method="multi")
     print(f"OK   {SCHEMA}.{tabla}: {len(df):,} registros")
+
+
+def copiar_csv_crudo(conn, tabla: str, raw: bytes, archivo: str, source_url: str,
+                     run_id: str, ingested_at: datetime) -> int:
+    """Crea bronze.<tabla> con las columnas del encabezado del CSV y lo carga con COPY, sin tocar las filas."""
+    # DECISIÓN D05: el archivo de hogares 2023 mezcla finales de línea (encabezado CRLF,
+    # datos LF) y COPY lo rechaza. Se uniforman a LF; ningún valor de las filas cambia.
+    texto = leer_csv_texto(raw).replace("\r\n", "\n")
+    encabezado = next(csv.reader(io.StringIO(texto.split("\n", 1)[0])))
+    columnas = [normalizar_columna(c) for c in encabezado]
+    if len(set(columnas)) != len(columnas):
+        raise ValueError(f"{archivo}: columnas duplicadas tras normalizar")
+
+    meta = {
+        "_ingested_at": f"TIMESTAMPTZ DEFAULT '{ingested_at.isoformat()}'",
+        "_source_url": f"TEXT DEFAULT '{source_url}'",
+        "_run_id": f"TEXT DEFAULT '{run_id}'",
+        "_archivo": f"TEXT DEFAULT '{archivo}'",
+    }
+    definicion = ", ".join([*(f'"{c}" TEXT' for c in columnas), *(f'"{c}" {t}' for c, t in meta.items())])
+    conn.exec_driver_sql(f'DROP TABLE IF EXISTS {SCHEMA}."{tabla}"')
+    conn.exec_driver_sql(f'CREATE TABLE {SCHEMA}."{tabla}" ({definicion})')
+
+    lista = ", ".join(f'"{c}"' for c in columnas)
+    with conn.connection.cursor() as cur:
+        cur.copy_expert(f'COPY {SCHEMA}."{tabla}" ({lista}) FROM STDIN WITH (FORMAT csv, HEADER true)',
+                        io.StringIO(texto))
+        n = cur.rowcount
+    print(f"OK   {SCHEMA}.{tabla}: {n:,} registros ({len(columnas)} columnas)")
+    return n
 
 
 # --------------------------------------------------------------------------
 # Extracciones
 # --------------------------------------------------------------------------
-def extraer_cargar_incidencia(engine, run_id: str, ingested_at: datetime) -> None:
-    """Incidencia delictiva municipal (SESNSP). El archivo trae todo México; solo se guarda Yucatán."""
-    r = cffi_requests.get(URL_INCIDENCIA, impersonate="chrome", timeout=300)
-    r.raise_for_status()
+def extraer_cargar_endutih(engine, run_id: str, ingested_at: datetime) -> None:
+    """ENDUTIH 2020-2024: hogares, usuarios y usuarios2 por año, diccionarios y catálogo de entidades."""
+    zips = {}
+    for anio, url in URLS_ENDUTIH.items():  # fail-fast: primero se descargan todos los años
+        zips[anio] = abrir_zip(descargar(url), url)
+        print(f"     endutih {anio}: descargado")
 
-    df = pd.read_csv(io.BytesIO(r.content), encoding="latin1", dtype=str)
-    df = normalizar_columnas(df)
+    diccionarios, catalogo = [], None
+    with engine.begin() as conn:
+        for anio, z in zips.items():
+            url = URLS_ENDUTIH[anio]
+            nombres = z.namelist()
+            for patron, tabla in PATRON_TABLAS_ENDUTIH.items():
+                datos = [n for n in nombres if re.search(rf"conjuntos?_de_datos/{patron}_{anio}\.csv$", n)]
+                if len(datos) != 1:
+                    raise ValueError(f"endutih {anio}: se esperaba 1 archivo para '{tabla}', hay {datos}")
+                archivo = datos[0]
+                copiar_csv_crudo(conn, f"endutih_{tabla}_{anio}", z.read(archivo), archivo.split("/")[-1],
+                                 url, run_id, ingested_at)
 
-    df = df[df["clave_ent"] == CLAVE_YUCATAN].copy()
-    if df.empty:
-        raise ValueError(f"No se encontraron registros con clave_ent = {CLAVE_YUCATAN}")
+                dic = [n for n in nombres if "diccionario" in n.lower()
+                       and n.endswith(archivo.split("/")[-1])]
+                if len(dic) != 1:
+                    raise ValueError(f"endutih {anio}: no se encontró el diccionario de {archivo}")
+                d = pd.read_csv(io.StringIO(leer_csv_texto(z.read(dic[0]))), dtype=str)
+                d = normalizar_columnas(d)
+                d["anio"], d["tabla"], d["_archivo"] = str(anio), tabla, dic[0].split("/")[-1]
+                diccionarios.append(agregar_metadatos(d, url, run_id, ingested_at))
 
-    df = agregar_metadatos(df, URL_INCIDENCIA, run_id, ingested_at)
-    cargar_tabla(df, "incidencia_delictiva", engine)
+            cat = [n for n in nombres if n.endswith("tc_endutih_entidad.csv")]
+            if cat:
+                catalogo = pd.read_csv(io.StringIO(leer_csv_texto(z.read(cat[0]))), dtype=str)
+                catalogo = agregar_metadatos(normalizar_columnas(catalogo), url, run_id, ingested_at)
 
-
-def extraer_cargar_iter(engine, run_id: str, ingested_at: datetime) -> None:
-    """Censo 2020, ITER Yucatán. Incluye filas de totales (MUN 000, LOC 0000/9998/9999) tal como vienen."""
-    r = requests.get(URL_ITER, timeout=120)
-    r.raise_for_status()
-
-    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        csv_name = next(n for n in z.namelist() if n.lower().endswith(".csv") and "conjunto_de_datos" in n.lower())
-        with z.open(csv_name) as f:
-            df = pd.read_csv(f, dtype=str)
-
-    df = normalizar_columnas(df)
-    df = agregar_metadatos(df, URL_ITER, run_id, ingested_at)
-    cargar_tabla(df, "iter_2020", engine)
-
-
-def version_scian(edicion: str) -> str:
-    # Desde 2019 hasta 05/2024 -> SCIAN 2018; desde 11/2024 -> SCIAN 2023
-    return "SCIAN 2023" if edicion >= "2024_11" else "SCIAN 2018"
-
-
-def descargar_denue(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=300)
-    r.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        csvs = [n for n in z.namelist() if n.lower().endswith(".csv") and "conjunto_de_datos" in n.lower()]
-        partes = []
-        for name in csvs:  # algunas ediciones parten el estado en varios CSV
-            raw = z.read(name)
-            try:
-                partes.append(pd.read_csv(io.BytesIO(raw), dtype=str, encoding="utf-8"))
-            except UnicodeDecodeError:
-                partes.append(pd.read_csv(io.BytesIO(raw), dtype=str, encoding="latin-1"))
-        return pd.concat(partes, ignore_index=True)
+        if catalogo is None:
+            raise ValueError("endutih: ningún año trae el catálogo de entidades (tc_endutih_entidad.csv)")
+        cargar_tabla(pd.concat(diccionarios, ignore_index=True), "endutih_diccionario", conn)
+        cargar_tabla(catalogo, "endutih_cat_entidad", conn)
 
 
-def extraer_cargar_denue(engine, run_id: str, ingested_at: datetime) -> None:
-    """DENUE Yucatán, todas las ediciones en una sola tabla.
-
-    Si una edición no tiene alguna columna que otra sí tiene, queda en NULL
-    (pd.concat). Pendiente de revisar si el cambio de SCIAN causa problemas.
-    """
-    dfs = []
-    for edicion, url in EDICIONES_DENUE.items():
-        df = descargar_denue(url)  # fail-fast: si una edición falla, no se carga nada
-        df["EDICION"] = edicion
-        df["ANIO"] = edicion[:4]
-        df["SCIAN"] = version_scian(edicion)
-        df = normalizar_columnas(df)
-        df = agregar_metadatos(df, url, run_id, ingested_at)  # _source_url = URL de cada edición
-        dfs.append(df)
-        print(f"     denue {edicion}: {len(df):,} registros descargados")
-
-    denue = pd.concat(dfs, ignore_index=True)
-    cargar_tabla(denue, "denue", engine)
+def leer_tabulado_inegi(raw: bytes) -> pd.DataFrame:
+    """Tabulado de datos abiertos de INEGI: 'Descriptores' + una columna por año ('2023<R>', '2024<P>')."""
+    return normalizar_columnas(pd.read_csv(io.StringIO(leer_csv_texto(raw)), dtype=str))
 
 
-def extraer_cargar_marco_geo(engine, run_id: str, ingested_at: datetime) -> None:
-    """Polígonos municipales de Yucatán (Marco Geoestadístico INEGI)."""
-    r = requests.get(URL_MARCO_GEO, timeout=120)
-    r.raise_for_status()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            z.extractall(tmp)
-            shp = next(n for n in z.namelist() if n.endswith("mun.shp"))
-        mun = gpd.read_file(f"{tmp}/{shp}")
-
-    # El .prj de INEGI describe EPSG:6372, pero con un nombre propio
-    # ("MEXICO_ITRF_2008_LCC") que a veces no se reconoce como código EPSG.
-    # Esto NO mueve las coordenadas: solo etiqueta el SRID para que PostGIS lo guarde como 6372.
-    mun = mun.set_crs(epsg=6372, allow_override=True)
-
-    mun = normalizar_columnas(mun)  # la columna 'geometry' conserva su nombre
-    mun = agregar_metadatos(mun, URL_MARCO_GEO, run_id, ingested_at)
-    cargar_tabla(mun, "marco_geo_municipal", engine)
+def extraer_cargar_vabcoel(engine, run_id: str, ingested_at: datetime) -> None:
+    """Valor Agregado Bruto del Comercio Electrónico 2013-2024 (los 7 tabulados del ZIP)."""
+    z = abrir_zip(descargar(URL_VABCOEL), URL_VABCOEL)
+    indice = pd.read_csv(io.StringIO(leer_csv_texto(z.read("conjunto_de_datos/indice.csv"))),
+                         header=None, names=["archivo", "titulo"], dtype=str)
+    partes = []
+    for archivo, titulo in indice.itertuples(index=False):
+        df = leer_tabulado_inegi(z.read(f"conjunto_de_datos/{archivo}"))
+        df["archivo"], df["titulo"] = archivo, titulo
+        partes.append(df)
+    df = agregar_metadatos(pd.concat(partes, ignore_index=True), URL_VABCOEL, run_id, ingested_at)
+    with engine.begin() as conn:
+        cargar_tabla(df, "vabcoel", conn)
 
 
-def extraer_cargar_scian(engine, run_id: str, ingested_at: datetime) -> None:
-    """Catálogo SCIAN (INEGI), versiones 2018 y 2023, una hoja de Excel por nivel.
+def extraer_cargar_pibe(engine, run_id: str, ingested_at: datetime) -> None:
+    """PIB por entidad federativa 2003-2023: VAB total, sector 51 (información) y sector 21 (minería)."""
+    z = abrir_zip(descargar(URL_PIBE), URL_PIBE)
+    partes = []
+    for archivo in ARCHIVOS_PIBE:
+        df = leer_tabulado_inegi(z.read(f"conjunto_de_datos/{archivo}"))
+        df["archivo"] = archivo
+        partes.append(df)
+    df = agregar_metadatos(pd.concat(partes, ignore_index=True), URL_PIBE, run_id, ingested_at)
+    with engine.begin() as conn:
+        cargar_tabla(df, "pibe", conn)
 
-    Se guardan todas las hojas de nivel tal como vienen, con dos columnas extra:
-    HOJA (nivel) y SCIAN (versión). Solo se quitan los renglones completamente
-    vacíos que deja el formato del Excel. La hoja CLASE incluye renglones del
-    índice de productos sin código; se conservan (silver los filtra).
-    """
-    dfs = []
-    for version, url in URLS_SCIAN.items():
-        r = requests.get(url, timeout=300)
-        r.raise_for_status()
-        for hoja in HOJAS_SCIAN:
-            # La fila 0 es el título del documento; los encabezados están en la fila 1
-            df = pd.read_excel(io.BytesIO(r.content), sheet_name=hoja, header=1, dtype=str)
-            df = df.dropna(how="all")
-            df["HOJA"] = hoja
-            df["SCIAN"] = version
-            df = normalizar_columnas(df)
-            df = agregar_metadatos(df, url, run_id, ingested_at)
-            dfs.append(df)
-        print(f"     scian {version}: descargado")
 
-    scian = pd.concat(dfs, ignore_index=True)
-    cargar_tabla(scian, "scian", engine)
+def extraer_cargar_oecd(engine, run_id: str, ingested_at: datetime) -> None:
+    """OECD ICT Access and Usage by Households / Individuals, total nacional por país."""
+    tablas = {}
+    for tabla, url in URLS_OECD.items():
+        df = pd.read_csv(io.BytesIO(descargar(url, headers=HEADERS_OECD)), dtype=str)
+        # 'REF_AREA: Reference area' -> 'ref_area' (la etiqueta larga va en los valores: 'MEX: Mexico')
+        df.columns = [normalizar_columna(c.split(":")[0]) for c in df.columns]
+        if df.empty:
+            raise ValueError(f"{tabla}: la consulta SDMX no devolvió registros")
+        tablas[tabla] = agregar_metadatos(df, url, run_id, ingested_at)
+    with engine.begin() as conn:
+        for tabla, df in tablas.items():
+            cargar_tabla(df, tabla, conn)
 
 
 # --------------------------------------------------------------------------
@@ -247,12 +295,14 @@ def main() -> None:
     ingested_at = datetime.now(timezone.utc)
     print(f"run_id: {run_id}")
 
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}"))
+
     # Fail-fast: cualquier excepción detiene el script (no se atrapa a propósito).
-    extraer_cargar_incidencia(engine, run_id, ingested_at)
-    extraer_cargar_iter(engine, run_id, ingested_at)
-    extraer_cargar_denue(engine, run_id, ingested_at)
-    extraer_cargar_marco_geo(engine, run_id, ingested_at)
-    extraer_cargar_scian(engine, run_id, ingested_at)
+    extraer_cargar_endutih(engine, run_id, ingested_at)
+    extraer_cargar_vabcoel(engine, run_id, ingested_at)
+    extraer_cargar_pibe(engine, run_id, ingested_at)
+    extraer_cargar_oecd(engine, run_id, ingested_at)
 
     print("Carga a bronze completada.")
 

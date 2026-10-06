@@ -1,78 +1,72 @@
 -- Validaciones post-carga de la capa silver.
 -- Correr con:
---   docker exec -i yucatan_dw psql -U admin -d yucatan_dw < validaciones/silver.sql
+--   docker exec -i ed_dw psql -U admin -d economia_digital_dw < validaciones/silver.sql
 -- No vive en ./sql porque esa carpeta se monta en /docker-entrypoint-initdb.d y Docker
 -- ejecutaría estas consultas al crear la base, cuando bronze todavía no existe.
 
 -- 1. Conteo de filas por tabla
-SELECT 'municipios' AS tabla, count(*) AS filas FROM silver.municipios
-UNION ALL SELECT 'censo_municipal', count(*) FROM silver.censo_municipal
-UNION ALL SELECT 'cat_scian', count(*) FROM silver.cat_scian
-UNION ALL SELECT 'crosswalk_municipio_nombre', count(*) FROM silver.crosswalk_municipio_nombre
-UNION ALL SELECT 'denue_establecimientos', count(*) FROM silver.denue_establecimientos
-UNION ALL SELECT 'incidencia_delictiva', count(*) FROM silver.incidencia_delictiva;
+SELECT 'cat_entidad' AS tabla, count(*) AS filas FROM silver.cat_entidad
+UNION ALL SELECT 'endutih_mapeo_variables', count(*) FROM silver.endutih_mapeo_variables
+UNION ALL SELECT 'endutih_hogar', count(*) FROM silver.endutih_hogar
+UNION ALL SELECT 'endutih_persona', count(*) FROM silver.endutih_persona
+UNION ALL SELECT 'vabcoel', count(*) FROM silver.vabcoel
+UNION ALL SELECT 'pib_entidad', count(*) FROM silver.pib_entidad
+UNION ALL SELECT 'oecd_ict', count(*) FROM silver.oecd_ict;
 
--- 2. FKs sin huérfanos (todas deben dar 0)
-SELECT 'censo -> municipios' AS relacion, count(*) AS huerfanos
-FROM silver.censo_municipal c LEFT JOIN silver.municipios m USING (cvegeo) WHERE m.cvegeo IS NULL
-UNION ALL
-SELECT 'denue -> municipios', count(*)
-FROM silver.denue_establecimientos d LEFT JOIN silver.municipios m USING (cvegeo) WHERE m.cvegeo IS NULL
-UNION ALL
-SELECT 'denue -> cat_scian', count(*)
-FROM silver.denue_establecimientos d
-LEFT JOIN silver.cat_scian s ON s.codigo = d.codigo_act AND s.version_scian = d.version_scian
-WHERE s.codigo IS NULL
-UNION ALL
-SELECT 'incidencia -> municipios', count(*)
-FROM silver.incidencia_delictiva i LEFT JOIN silver.municipios m USING (cvegeo) WHERE m.cvegeo IS NULL
-UNION ALL
-SELECT 'crosswalk -> municipios', count(*)
-FROM silver.crosswalk_municipio_nombre x LEFT JOIN silver.municipios m USING (cvegeo) WHERE m.cvegeo IS NULL;
+-- 2. Bronze -> silver sin pérdida de registros de la ENDUTIH (diferencia debe ser 0)
+SELECT anio, b.n AS bronze, s.n AS silver, b.n - s.n AS diferencia
+FROM (SELECT 2020 AS anio, count(*) AS n FROM bronze.endutih_hogares_2020
+      UNION ALL SELECT 2021, count(*) FROM bronze.endutih_hogares_2021
+      UNION ALL SELECT 2022, count(*) FROM bronze.endutih_hogares_2022
+      UNION ALL SELECT 2023, count(*) FROM bronze.endutih_hogares_2023
+      UNION ALL SELECT 2024, count(*) FROM bronze.endutih_hogares_2024) b
+JOIN (SELECT anio, count(*) AS n FROM silver.endutih_hogar GROUP BY anio) s USING (anio)
+ORDER BY anio;
 
--- 3. Cobertura de cvegeo al 100%: municipios presentes en cada tabla (deben ser 106)
---    y registros sin cvegeo (deben ser 0)
-SELECT 'censo_municipal' AS tabla, count(DISTINCT cvegeo) AS municipios_cubiertos,
-       count(*) FILTER (WHERE cvegeo IS NULL) AS sin_cvegeo
-FROM silver.censo_municipal
-UNION ALL
-SELECT 'denue_establecimientos', count(DISTINCT cvegeo), count(*) FILTER (WHERE cvegeo IS NULL)
-FROM silver.denue_establecimientos
-UNION ALL
-SELECT 'incidencia_delictiva', count(DISTINCT cvegeo), count(*) FILTER (WHERE cvegeo IS NULL)
-FROM silver.incidencia_delictiva
-UNION ALL
-SELECT 'crosswalk_municipio_nombre', count(DISTINCT cvegeo), count(*) FILTER (WHERE cvegeo IS NULL)
-FROM silver.crosswalk_municipio_nombre;
+-- 3. Cobertura: 32 entidades por año, muestra de Yucatán y Tabasco
+SELECT anio, count(DISTINCT cve_ent) AS entidades,
+       count(*) FILTER (WHERE cve_ent = '31') AS hogares_yucatan,
+       count(*) FILTER (WHERE cve_ent = '27') AS hogares_tabasco,
+       sum(fac_hog) AS hogares_expandidos
+FROM silver.endutih_hogar GROUP BY anio ORDER BY anio;
 
--- Nombres del dataset de crimen sin entrada en el crosswalk (debe dar 0)
-SELECT count(DISTINCT b.municipio) AS nombres_crimen_sin_crosswalk
-FROM bronze.incidencia_delictiva b
-LEFT JOIN silver.crosswalk_municipio_nombre x ON x.nombre_fuente = b.municipio
-WHERE x.nombre_fuente IS NULL;
-
--- 4. % de establecimientos donde coincide_municipio = false, por edición
-SELECT edicion,
-       count(*) AS establecimientos,
-       count(*) FILTER (WHERE NOT coincide_municipio) AS no_coincide,
-       round(100.0 * count(*) FILTER (WHERE NOT coincide_municipio) / count(*), 3) AS pct_no_coincide
-FROM silver.denue_establecimientos
-GROUP BY ROLLUP (edicion)
-ORDER BY edicion;
-
--- 5. Geometrías válidas y SRID correcto (inválidas y SRID distinto deben dar 0)
-SELECT 'municipios' AS tabla,
-       count(*) FILTER (WHERE NOT ST_IsValid(geom)) AS invalidas,
-       count(*) FILTER (WHERE ST_SRID(geom) <> 6372) AS srid_distinto
-FROM silver.municipios
+-- 4. Consistencia de saltos (todas deben dar 0)
+SELECT 'actividades contestadas por no usuarios' AS regla, count(*) AS violaciones
+FROM silver.endutih_persona
+WHERE NOT usa_internet AND (compra_internet OR vende_internet OR paga_internet OR banca_electronica OR usa_redes_sociales)
 UNION ALL
-SELECT 'denue_establecimientos',
-       count(*) FILTER (WHERE NOT ST_IsValid(geom)),
-       count(*) FILTER (WHERE ST_SRID(geom) <> 6372)
-FROM silver.denue_establecimientos;
+SELECT 'smartphone sin usar celular', count(*) FROM silver.endutih_persona WHERE usa_smartphone AND NOT usa_celular
+UNION ALL
+SELECT 'internet fijo sin internet', count(*) FROM silver.endutih_hogar WHERE internet_fija AND NOT tiene_internet
+UNION ALL
+SELECT 'razón sin internet en hogar conectado', count(*) FROM silver.endutih_hogar
+WHERE tiene_internet AND razon_sin_internet IS NOT NULL
+UNION ALL
+SELECT 'informantes menores de 6 años', count(*) FROM silver.endutih_persona WHERE edad < 6;
 
--- Extra: bitácora de la última corrida (descartes y reasignaciones del DENUE)
-SELECT tabla, metrica, valor
+-- 5. Estratos con una sola UPM (deben ser 0: el error estándar los necesita con 2 o más)
+SELECT anio, count(*) AS estratos_con_una_upm
+FROM (SELECT anio, est_dis, count(DISTINCT upm_dis) AS upms FROM silver.endutih_hogar GROUP BY 1, 2) t
+WHERE upms < 2 GROUP BY anio;
+
+-- 6. PIB: la suma de las entidades coincide con el nacional (diferencia relativa < 0.1%)
+SELECT anio, concepto, precios,
+       round((sum(valor_mdp) FILTER (WHERE cve_ent <> '00') / max(valor_mdp) FILTER (WHERE cve_ent = '00') - 1)::NUMERIC, 6)
+         AS diferencia_relativa
+FROM silver.pib_entidad WHERE anio >= 2018
+GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+
+-- 7. VABCOEL: componentes suman el total
+SELECT anio, round(sum(valor) FILTER (WHERE componente <> 'total')::NUMERIC, 1) AS suma_componentes,
+       round(max(valor) FILTER (WHERE componente = 'total')::NUMERIC, 1) AS total
+FROM silver.vabcoel WHERE medida = 'mdp_corrientes' GROUP BY anio ORDER BY anio;
+
+-- 8. Mapeo de preguntas por año (renumeraciones de la ENDUTIH)
+SELECT concepto, string_agg(anio || ':' || columna, '  ' ORDER BY anio, columna) AS columnas
+FROM silver.endutih_mapeo_variables GROUP BY concepto ORDER BY concepto;
+
+-- Extra: bitácora de decisiones de la última corrida
+SELECT tabla, metrica, valor, detalle
 FROM silver.etl_log
 WHERE run_id = (SELECT run_id FROM silver.etl_log ORDER BY fecha_carga DESC, id DESC LIMIT 1)
 ORDER BY id;

@@ -1,13 +1,6 @@
 pandas
-geopandas
-shapely
 requests
-curl_cffi
 sqlalchemy
 psycopg2-binary
-geoalchemy2
-openpyxl
 scipy
-libpysal
-esda
 matplotlib

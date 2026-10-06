@@ -1,0 +1,86 @@
+"""
+Pipeline completo de economia_digital_dw: bronze -> silver -> gold -> analytics.
+
+    extraer_endutih ─┐
+    extraer_vabcoel ─┤
+    extraer_pibe    ─┼──> bronze_to_silver ──> silver_to_gold ──> gold_analytics
+    extraer_oecd    ─┘
+
+Los 4 extractores corren en paralelo, uno por fuente. bronze_to_silver espera a
+los 4: si cualquiera falla, silver no se toca (mismo fail-fast que el script).
+
+Metadatos de bronze:
+    Los 4 extractores comparten run_id e _ingested_at, derivados del DAG run para
+    que un reintento de cualquier tarea escriba los mismos valores:
+        run_id       = uuid5 de "<dag_id>/<run_id de Airflow>"
+        _ingested_at = logical_date del DAG run (inicio del lote, no la hora en
+                       que se escribió cada tabla)
+
+Los scripts de src/ se importan dentro de cada tarea, no al inicio del archivo,
+para que el scheduler no cargue pandas/scipy cada vez que parsea el DAG.
+"""
+
+import sys
+import uuid
+from pathlib import Path
+
+import pendulum
+from airflow.decorators import dag, task
+
+# dags/ y src/ se montan lado a lado en /opt/airflow/
+SRC = Path(__file__).resolve().parent.parent / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+EXTRACCIONES = {
+    "extraer_endutih": "extraer_cargar_endutih",
+    "extraer_vabcoel": "extraer_cargar_vabcoel",
+    "extraer_pibe": "extraer_cargar_pibe",
+    "extraer_oecd": "extraer_cargar_oecd",
+}
+
+
+def ejecutar_extraccion(funcion: str, dag_run=None, logical_date=None) -> None:
+    from sqlalchemy import create_engine
+
+    import extractor_to_bronze
+
+    run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{dag_run.dag_id}/{dag_run.run_id}"))
+    print(f"run_id: {run_id} (Airflow: {dag_run.run_id})")
+
+    engine = create_engine(extractor_to_bronze.DB_URL)
+    getattr(extractor_to_bronze, funcion)(engine, run_id, logical_date)
+
+
+@dag(
+    dag_id="pipeline_economia_digital_dw",
+    schedule="@once",  # corre una sola vez al registrarse en una base de metadatos nueva
+    start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
+    catchup=False,
+    tags=["economia_digital_dw"],
+)
+def pipeline_economia_digital_dw():
+    extracciones = [
+        task(task_id=task_id, retries=2, retry_delay=pendulum.duration(minutes=2))(ejecutar_extraccion)(funcion)
+        for task_id, funcion in EXTRACCIONES.items()
+    ]
+
+    @task
+    def bronze_to_silver():
+        import bronze_to_silver
+        bronze_to_silver.main()
+
+    @task
+    def silver_to_gold():
+        import silver_to_gold
+        silver_to_gold.main()
+
+    @task
+    def gold_analytics():
+        import gold_analytics
+        gold_analytics.main()
+
+    extracciones >> bronze_to_silver() >> silver_to_gold() >> gold_analytics()
+
+
+pipeline_economia_digital_dw()

@@ -1,140 +1,98 @@
-# Hallazgos del análisis de gold
+# Hallazgos: economía digital de Yucatán vs Tabasco vs México
 
-Resultados de `src/gold_analytics.py` (tablas `gold.resultado_*`), panel municipal de
-Yucatán 2020–2025, 106 municipios. Pesos Queen (`gold.vecinos_municipio`) estandarizados
-por fila, 999 permutaciones con semilla fija, significancia al 0.05.
+Resultados de `gold.fact_encuesta_tic`, `gold.valor_entidad_anio` y las tablas
+`gold.resultado_*` (`src/gold_analytics.py`). Estimaciones de la ENDUTIH con su intervalo de
+confianza al 90% (nivel de INEGI); una diferencia solo se reporta como tal si la prueba z es
+significativa al 90%. Las figuras están en `outputs/figures/` y en el dashboard.
 
-Corrida: `bronze_to_silver` run_id `d2efc1f1-531a-49ff-950f-d479e1dc1fc2`,
-`silver_to_gold` run_id `3ca8403e-2404-49c0-bb25-a2a4039ec683`,
-`gold_analytics` run_id `6d5c0ca2-30d7-42a3-8d51-6d784aef7475`.
-El polígono de Progreso ya no incluye el Arrecife Alacranes (426.4 km² en lugar de ~658 km²).
+## Panorama 2024
 
-Ver las cautelas del README: Mérida es un outlier, las tasas son inestables en municipios
-de baja población y la asociación espacial no implica causalidad.
-
-## 1. Correlaciones: Pearson vs Spearman
-
-| Par | Año | Pearson | p | Spearman | p |
-| --- | --- | --- | --- | --- | --- |
-| densidad poblacional vs densidad de negocios | 2020 | 0.920 | < 0.001 | 0.848 | < 0.001 |
-| | 2021 | 0.922 | < 0.001 | 0.848 | < 0.001 |
-| | 2022 | 0.922 | < 0.001 | 0.848 | < 0.001 |
-| | 2023 | 0.924 | < 0.001 | 0.850 | < 0.001 |
-| | 2024 | 0.956 | < 0.001 | 0.853 | < 0.001 |
-| | 2025 | 0.955 | < 0.001 | 0.842 | < 0.001 |
-| tasa delictiva vs negocios por 1,000 hab | 2020 | -0.047 | 0.630 | -0.060 | 0.544 |
-| | 2021 | -0.106 | 0.278 | -0.042 | 0.667 |
-| | 2022 | 0.027 | 0.784 | -0.130 | 0.184 |
-| | 2023 | -0.149 | 0.128 | -0.175 | 0.073 |
-| | 2024 | -0.137 | 0.163 | -0.018 | 0.851 |
-| | 2025 | -0.053 | 0.587 | -0.006 | 0.950 |
-| tasa PEA vs tasa delictiva | 2020 | 0.058 | 0.552 | 0.079 | 0.423 |
-| | 2021 | 0.285 | 0.003 | 0.235 | 0.015 |
-| | 2022 | 0.137 | 0.162 | 0.144 | 0.140 |
-| | 2023 | 0.169 | 0.084 | 0.148 | 0.129 |
-| | 2024 | 0.169 | 0.083 | 0.124 | 0.207 |
-| | 2025 | 0.245 | 0.011 | 0.205 | 0.035 |
-
-- **Densidad poblacional y densidad de negocios** tienen una relación muy fuerte y estable
-  en los 6 años. Pearson (0.92–0.96) siempre es mayor que Spearman (0.84–0.85), lo que es
-  compatible con que Mérida, extrema en ambas variables, infle Pearson (no se aisló
-  quitando a Mérida).
-- **Tasa delictiva y negocios por 1,000 habitantes** no tienen relación: ningún año es
-  significativo con ninguno de los dos métodos.
-- **Tasa PEA y tasa delictiva** tienen una relación positiva débil, significativa solo en
-  2021 y 2025 con ambos métodos; no es estable entre años.
-
-## 2. Moran global
-
-| Indicador | Año | I | z (sim) | p_sim |
+| Indicador | Yucatán | Tabasco | México | Dimensión |
 | --- | --- | --- | --- | --- |
-| densidad de negocios | 2020 | 0.195 | 4.72 | 0.001 |
-| | 2021 | 0.196 | 4.72 | 0.001 |
-| | 2022 | 0.196 | 4.72 | 0.001 |
-| | 2023 | 0.197 | 4.74 | 0.001 |
-| | 2024 | 0.199 | 4.50 | 0.004 |
-| | 2025 | 0.198 | 4.50 | 0.006 |
-| tasa delictiva por 1,000 hab | 2020 | 0.175 | 3.68 | 0.004 |
-| | 2021 | 0.118 | 2.15 | 0.029 |
-| | 2022 | 0.157 | 3.11 | 0.014 |
-| | 2023 | 0.192 | 3.52 | 0.002 |
-| | 2024 | 0.295 | 5.33 | 0.001 |
-| | 2025 | 0.121 | 2.10 | 0.027 |
+| Hogares con internet | 73.9% (#19) | 71.7% (#20) | 73.6% | Acceso |
+| Hogares con internet fijo | 72.2% | 69.6% | 71.2% | Acceso |
+| Hogares con computadora | 41.7% (#20) | **37.2% (#27)** | 43.9% | Acceso |
+| Usuarios de smartphone (6+) | 85.7% | 84.9% | 84.0% | Acceso |
+| Usuarios de internet (6+) | **86.0% (#14)** | 83.5% (#20) | 83.1% | Uso |
+| Compran por internet (% usuarios) | **44.4% (#4)** | 34.8% (#20) | 35.8% | Uso |
+| Venden por internet (% usuarios) | **20.5% (#1)** | 10.3% (#22) | 11.2% | Uso |
+| Pagan por internet (% usuarios) | 37.5% (#10) | 33.9% | 33.0% | Uso |
+| Banca electrónica (% usuarios) | **21.8% (#8)** | 16.4% | 17.7% | Uso |
+| Sector 51 en el VAB no minero (2023) | 1.01% (#4) | 0.60% (#13) | 1.54% | Valor |
+| Comercio electrónico en el PIB (2024p) | — | — | 6.9% | Valor |
 
-E[I] = -0.01 en todos los casos.
+`#n` = lugar entre las 32 entidades. En negritas, diferencias significativas contra el nacional.
 
-- Las dos variables presentan **autocorrelación espacial positiva y significativa en todos
-  los años**: municipios con valores parecidos tienden a ser vecinos.
-- La densidad de negocios es muy estable (I ≈ 0.20). La tasa delictiva varía más; 2024 es
-  el año más agrupado (I = 0.295).
+## 1. Yucatán: la entidad que más vende en línea del país
 
-## 3. Moran bivariado: tasa delictiva vs densidad de negocios
+- El **20.5%** de los usuarios de internet de Yucatán vendió algo en línea en 2024: **lugar 1 de
+  32** y casi el doble del nacional (11.2%). La diferencia (+9.4 pp) es significativa
+  (p < 0.001) y **persistente**: Yucatán estuvo entre los 4 primeros los 5 años (1º en 2022 y 2024).
+- También compra más: 44.4% (#4), +8.6 pp sobre el nacional, y está **entre 6 y 9 pp por encima
+  de lo que predice su nivel de conexión** (recta de mínimos cuadrados entre las 32 entidades),
+  todos los años.
+- Banca electrónica: pasó de 14.4% (2020, debajo del nacional) a 21.8% (2024, +4.1 pp sobre el
+  nacional): **+7.4 pp, el mayor avance de las tres**, significativo.
+- No es por más acceso: Yucatán tiene los mismos hogares conectados que el país (+0.3 pp, no
+  significativo) y **menos computadoras** (41.7% vs 43.9%). La ventaja está en el *uso económico*
+  de la conexión, no en la infraestructura.
 
-| Año | I | z (sim) | p_sim |
-| --- | --- | --- | --- |
-| 2020 | 0.031 | 0.62 | 0.211 |
-| 2021 | 0.069 | 1.37 | 0.092 |
-| 2022 | 0.036 | 0.72 | 0.196 |
-| 2023 | 0.039 | 0.77 | 0.197 |
-| 2024 | 0.045 | 0.74 | 0.187 |
-| 2025 | 0.005 | 0.11 | 0.435 |
+## 2. Tabasco: la brecha de acceso se cerró; la de uso económico no
 
-- **No es significativo en ningún año.** Cada variable se agrupa por su lado, pero la tasa
-  delictiva de un municipio no se asocia con la densidad de negocios de sus vecinos.
+- Hogares con internet: **43.6% → 71.7%** (2020–2024), **+28.2 pp**, el doble del avance nacional
+  (+13.7 pp). Pasó del lugar 30 al 20. Con internet fijo, +29.7 pp. La distancia con el nacional
+  bajó de 16 pp a 1.9 pp y **ya no es significativa** (p = 0.24).
+- La barrera económica cedió: los hogares sin internet que lo atribuyen a **falta de recursos**
+  bajaron de 73.6% a 55.3% (−18.3 pp, significativo), hoy igual que el nacional.
+- Pero el **uso económico** no siguió al acceso: compras (34.8%), ventas (10.3%) y banca (16.4%)
+  están en el promedio nacional o debajo, y la banca electrónica no cambió en 5 años
+  (−0.8 pp, no significativo).
+- **Computadora**: 37.2% de los hogares, 6.7 pp debajo del nacional (significativo), lugar 27 de
+  32. Es la brecha de acceso que queda.
 
-## 4. LISA por año
+## 3. México: el celular avanza, la computadora no
 
-### Densidad de negocios
+- Hogares con computadora: **43.8% → 43.9%** en 5 años (cambio no significativo). En Yucatán
+  incluso bajó (−1.5 pp, no significativo).
+- En el mismo periodo los usuarios de smartphone subieron de 73.9% a 84.0% y los de internet de
+  71.5% a 83.1%. La conectividad mexicana es **móvil**.
+- Las barreras para no tener internet en el hogar son económicas o de interés, **no de
+  infraestructura**: menos del 5% de los hogares sin internet dice que no hay proveedor en su
+  localidad (en las tres entidades).
 
-| Año | HH | HL | LH | LL |
-| --- | --- | --- | --- | --- |
-| 2020 | 8 | 0 | 4 | 16 |
-| 2021 | 8 | 0 | 4 | 16 |
-| 2022 | 8 | 0 | 4 | 16 |
-| 2023 | 8 | 0 | 4 | 16 |
-| 2024 | 6 | 1 | 4 | 15 |
-| 2025 | 6 | 1 | 4 | 16 |
+## 4. Valor económico
 
-- **Cluster HH estable alrededor de Mérida**: Mérida, Kanasín, Progreso, Conkal,
-  Chicxulub Pueblo y Tixkokob en los 6 años; Umán y Yaxkukul salen del cluster desde 2024.
-- **Valladolid** aparece como HL (alto rodeado de bajos) en 2024 y 2025.
-- **Clusters LL en el oriente y sur** del estado (p. ej. Tizimín, Panabá, Río Lagartos,
-  Buctzotz, Cenotillo, Yaxcabá, Temax, San Felipe).
+- **Comercio electrónico**: pasó de 3.3% del PIB nacional (2013) a **6.9% (2024, preliminar)**,
+  2.31 billones de pesos. El salto de 2022 (+39% nominal) es el mayor de la serie. Dentro del
+  comercio al por menor, el 21% del valor agregado ya es electrónico.
+- **Sector 51 (información: telecom, internet, software, medios)**:
+  - Yucatán es **4º de 32** en peso del sector 51 (fue 2º en 2007–2015), aunque con 1.0% queda
+    debajo del promedio nacional (1.5%), que jala la Ciudad de México. Su peso baja desde 2015
+    (2.0% → 1.0%): el sector crece, pero menos que el resto de su economía.
+  - Tabasco: el sector 51 es solo 0.33% de su VAB, pero la minería (petróleo) es el **45%**. Sin
+    ella, el sector pesa 0.60% y Tabasco pasa del lugar 29 al **13**. Cualquier comparación de
+    estructura económica con Tabasco tiene que quitar el petróleo.
+  - Los tres crecen en términos reales después de la caída de 2020 (pandemia): VAB real del
+    sector 51 en 2023 ≈ 110 (Yucatán y Tabasco) y 122 (nacional), con 2018 = 100.
 
-### Tasa delictiva por 1,000 habitantes
+## 5. Contexto internacional
 
-| Año | HH | HL | LH | LL |
-| --- | --- | --- | --- | --- |
-| 2020 | 6 | 3 | 5 | 5 |
-| 2021 | 9 | 3 | 6 | 9 |
-| 2022 | 5 | 2 | 3 | 13 |
-| 2023 | 6 | 0 | 5 | 15 |
-| 2024 | 12 | 1 | 4 | 9 |
-| 2025 | 7 | 1 | 5 | 10 |
+- México está en el lugar **30 de 32 países** con dato en usuarios de internet de 16 a 74 años
+  (85.8% en 2024 vs 93.9% del promedio OECD).
 
-Municipios HH por año:
+## 6. Validación del pipeline
 
-| Año | HH |
-| --- | --- |
-| 2020 | Bokobá, Cacalchén, Motul, Muxupip, Suma, Yobaín |
-| 2021 | Abalá, Celestún, Chicxulub Pueblo, Ixil, Progreso, Samahil, Tetiz, Umán, Yaxkukul |
-| 2022 | Cacalchén, Dzemul, Ixil, Motul, Telchac Pueblo |
-| 2023 | Cacalchén, Dzemul, Ixil, Mocochá, Motul, Tekantó |
-| 2024 | Baca, Bokobá, Cansahcab, Dzemul, Ixil, Mocochá, Motul, Sinanché, Suma, Telchac Pueblo, Yaxkukul, Yobaín |
-| 2025 | Dzemul, Hunucmá, Ixil, Mocochá, Motul, Oxkutzcab, Progreso |
+Las estimaciones nacionales calculadas aquí desde los microdatos se compararon con las cifras que
+México reporta a la OECD (que salen de la misma encuesta): en **7 de 8 medidas coinciden al
+centésimo** los 5 años (40 pares), y el 100% cae dentro del IC 90%. La única diferencia es
+internet fijo (0.2–0.4 pp), por el tratamiento de "no sabe" (D12). Es una validación externa de
+la ingesta, la armonización de preguntas entre años, los factores de expansión y la definición
+de los universos.
 
-- El cluster HH cambia de un año a otro, pero **se repite en el centro-norte** (Motul,
-  Ixil, Dzemul, Mocochá, Cacalchén). **Mérida no aparece** en el cluster HH de crimen.
-- **Valladolid** es HL en 2020, 2021 y 2022.
-- La variación del cluster entre años es consistente con la inestabilidad de las tasas en
-  municipios pequeños.
+## Cautelas
 
-## 5. Problemas de datos a revisar antes de interpretar tendencias
-
-- **Caída abrupta de incidencia en 2022.** Los incidentes del estado pasan de 8,565 (2021)
-  a 4,209 (2022); en Mérida de 6,522 a 1,820. En 2015 eran 34,716. Un cambio de esta
-  magnitud parece de registro de la fuente (SESNSP), no de criminalidad real, y afecta
-  cualquier comparación entre años.
-- **Salto del DENUE en 2024.** El total del estado pasa de ~130 mil a ~142 mil
-  establecimientos, justo cuando la clasificación cambia de SCIAN 2018 a SCIAN 2023; en
-  Abalá, de 96 a 239. Puede ser un efecto de la fuente y no un cambio real.
+- Estimaciones por muestreo: ver IC 90% y calidad. Las razones minoritarias para no tener
+  internet ("sin proveedor", "no sabe usarlo") tienen calidad moderada o baja en las entidades.
+- PIB estatal 2023 y VABCOEL 2024 son preliminares. VABCOEL solo existe a nivel nacional.
+- 2020 se levantó en pandemia. El panel empieza en 2020 porque 2019 no trae clave de entidad (D01).
+- El nivel de entidad oculta la variación interna (Mérida vs el resto de Yucatán, Villahermosa vs el resto de Tabasco).

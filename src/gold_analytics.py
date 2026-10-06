@@ -1,60 +1,66 @@
 """
-Análisis estadístico y espacial sobre gold de yucatan_dw.
+Análisis estadístico sobre gold de economia_digital_dw.
 
-Lee SOLO de gold (kpi_municipio_anio y vecinos_municipio) y, para cada año del
-panel (2020 a 2025), calcula:
+Lee SOLO de gold (fact_encuesta_tic, valor_entidad_anio, fact_oecd_tic) y calcula:
 
-    gold.resultado_correlacion      <- Pearson y Spearman (scipy)
-    gold.resultado_moran_global     <- Moran global (esda)
-    gold.resultado_lisa             <- Moran local (LISA), significancia 0.05
-    gold.resultado_moran_bivariado  <- Moran bivariado
+    gold.resultado_brecha           <- Yucatán vs Tabasco, Yucatán vs nacional y Tabasco vs
+                                       nacional, por indicador y año, con prueba z
+    gold.resultado_tendencia        <- cambio del primer al último año de la ENDUTIH por entidad
+                                       foco, con prueba z, y pendiente por MCO (pp por año)
+    gold.resultado_ranking          <- lugar de cada entidad entre las 32, por indicador y año
+    gold.resultado_validacion_oecd  <- estimaciones nacionales de la ENDUTIH vs las cifras que
+                                       México reporta a OECD (validación cruzada del pipeline)
 
-Pesos espaciales: contigüidad Queen desde gold.vecinos_municipio, estandarizados
-por fila. Permutaciones: 999 con semilla fija (resultados reproducibles).
+Pruebas de diferencias (nivel de confianza 90%, el que usa INEGI):
+    - Entre dos entidades: muestras independientes (los estratos están anidados en las
+      entidades), V(a - b) = V(a) + V(b).
+    - Entidad vs nacional: el nacional incluye a la entidad. Con s = peso de la entidad en el
+      universo nacional, nacional = s·entidad + (1 - s)·resto, así que
+      Cov(entidad, nacional) = s·V(entidad) y V(e - n) = V(e) + V(n) - 2·s·V(e).
+    - Entre años: levantamientos independientes, V(final - inicial) = V(final) + V(inicial).
 
 Manejo de errores (fail-fast):
     Primero se calcula todo en memoria; después TRUNCATE + INSERT de las tablas
     resultado_* en una sola transacción. Si algo falla, gold queda como estaba.
 """
 
+import os
 import uuid
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
-from esda import Moran, Moran_BV, Moran_Local
-from libpysal.weights import W
 from scipy import stats
 from sqlalchemy import create_engine, text
 
 # --------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------
-DB_URL = "postgresql+psycopg2://admin:admin123@db:5432/yucatan_dw"
+DB_URL = os.environ.get("DB_URL", "postgresql+psycopg2://admin:admin123@db:5432/economia_digital_dw")
 SCHEMA = "gold"
 
-ANIOS_PANEL = range(2020, 2026)
-PERMUTACIONES = 999
-SEMILLA = 42
-ALFA = 0.05
+ALFA = 0.10
+NACIONAL, TABASCO, YUCATAN = "00", "27", "31"
+PARES = [(YUCATAN, TABASCO), (YUCATAN, NACIONAL), (TABASCO, NACIONAL)]
+FOCO = [NACIONAL, TABASCO, YUCATAN]
 
-# Pares (x, y) de columnas de gold.kpi_municipio_anio
-CORRELACIONES = [
-    ("tasa_delictiva_1000_hab", "negocios_por_1000_hab"),
-    ("densidad_poblacional", "densidad_negocios"),
-    ("tasa_pea", "tasa_delictiva_1000_hab"),
-]
-INDICADORES_MORAN = ["tasa_delictiva_1000_hab", "densidad_negocios"]
-MORAN_BIVARIADO = [("tasa_delictiva_1000_hab", "densidad_negocios")]
-
-# Cuadrantes de esda.Moran_Local (geoda_quads=False)
-CUADRANTES = {1: "HH", 2: "LH", 3: "LL", 4: "HL"}
+# Medida OECD -> (indicador ENDUTIH, grupo de edad)
+VALIDACION_OECD = {
+    "B1_HH": ("hog_internet", "total"),
+    "A1_HH": ("hog_computadora", "total"),
+    "B21A_HH": ("hog_internet_fija", "total"),
+    "C5B_I": ("pob_internet", "16_74"),
+    "C2B_I": ("pob_computadora", "16_74"),
+    "G1_I": ("pob_compra", "16_74"),
+    "D1T_I": ("pob_banca", "16_74"),
+    "D1B_I": ("pob_redes_sociales", "16_74"),
+}
 
 TABLAS = [
-    "resultado_correlacion",
-    "resultado_moran_global",
-    "resultado_lisa",
-    "resultado_moran_bivariado",
+    "resultado_brecha",
+    "resultado_tendencia",
+    "resultado_ranking",
+    "resultado_validacion_oecd",
 ]
 
 
@@ -66,69 +72,86 @@ def exigir(condicion: bool, mensaje: str) -> None:
         raise ValueError(mensaje)
 
 
-def construir_pesos(engine, cvegeos: list) -> W:
-    """Pesos Queen desde gold.vecinos_municipio, estandarizados por fila, en el orden de cvegeos."""
-    vecinos = pd.read_sql("SELECT cvegeo, cvegeo_vecino FROM gold.vecinos_municipio", engine)
-    vecinos["cvegeo"] = vecinos["cvegeo"].str.strip()
-    vecinos["cvegeo_vecino"] = vecinos["cvegeo_vecino"].str.strip()
-    por_municipio = vecinos.groupby("cvegeo")["cvegeo_vecino"].apply(sorted).to_dict()
-    sin_vecinos = [c for c in cvegeos if c not in por_municipio]
-    exigir(not sin_vecinos, f"vecinos_municipio: municipios sin vecinos {sin_vecinos}")
-
-    w = W({c: por_municipio[c] for c in cvegeos}, id_order=cvegeos)
-    w.transform = "r"
-    return w
+def prueba_z(diferencia: float, error: float) -> tuple:
+    if error <= 0:
+        return None, None
+    z = diferencia / error
+    return z, float(2 * stats.norm.sf(abs(z)))
 
 
 # --------------------------------------------------------------------------
 # Análisis
 # --------------------------------------------------------------------------
-def correlaciones(df: pd.DataFrame, anio: int) -> list:
+def brechas(enc: pd.DataFrame) -> pd.DataFrame:
+    e = enc.set_index(["anio", "id_indicador", "cve_ent"])
     filas = []
-    for x, y in CORRELACIONES:
-        datos = df[[x, y]].dropna()
-        for metodo, funcion in [("pearson", stats.pearsonr), ("spearman", stats.spearmanr)]:
-            coef, p = funcion(datos[x], datos[y])
-            filas.append((anio, x, y, metodo, float(coef), float(p), len(datos)))
-    return filas
+    for (anio, ind), _ in enc.groupby(["anio", "id_indicador"]):
+        for a, b in PARES:
+            ra, rb = e.loc[(anio, ind, a)], e.loc[(anio, ind, b)]
+            var = ra["error_estandar"] ** 2 + rb["error_estandar"] ** 2
+            if b == NACIONAL:
+                s = ra["universo_expandido"] / rb["universo_expandido"]
+                var -= 2 * s * ra["error_estandar"] ** 2
+            dif, ee = ra["estimacion"] - rb["estimacion"], float(np.sqrt(max(var, 0)))
+            z, p = prueba_z(dif, ee)
+            filas.append((anio, ind, a, b, dif, ee, z, p, p is not None and p < ALFA))
+    return pd.DataFrame(filas, columns=["anio", "id_indicador", "entidad_a", "entidad_b", "diferencia_pp",
+                                        "error_estandar", "z", "p_value", "significativa"])
 
 
-def moran_global(df: pd.DataFrame, w: W, anio: int) -> list:
+def tendencias(enc: pd.DataFrame) -> pd.DataFrame:
     filas = []
-    for indicador in INDICADORES_MORAN:
-        np.random.seed(SEMILLA)  # esda.Moran usa el generador global de numpy
-        m = Moran(df[indicador].to_numpy(), w, permutations=PERMUTACIONES)
-        filas.append((anio, indicador, m.I, m.EI, m.z_sim, m.p_sim))
-    return filas
+    for (cve, ind), g in enc[enc["cve_ent"].isin(FOCO)].groupby(["cve_ent", "id_indicador"]):
+        g = g.sort_values("anio")
+        ini, fin = g.iloc[0], g.iloc[-1]
+        cambio = fin["estimacion"] - ini["estimacion"]
+        ee = float(np.sqrt(fin["error_estandar"] ** 2 + ini["error_estandar"] ** 2))
+        z, p = prueba_z(cambio, ee)
+        pendiente = stats.linregress(g["anio"], g["estimacion"]).slope
+        filas.append((cve, ind, int(ini["anio"]), int(fin["anio"]), ini["estimacion"], fin["estimacion"],
+                      cambio, ee, p, p is not None and p < ALFA, pendiente))
+    return pd.DataFrame(filas, columns=["cve_ent", "id_indicador", "anio_inicial", "anio_final", "valor_inicial",
+                                        "valor_final", "cambio_pp", "error_estandar", "p_value", "significativo",
+                                        "pendiente_pp_anual"])
 
 
-def lisa(df: pd.DataFrame, w: W, anio: int) -> list:
+def rankings(enc: pd.DataFrame, valor: pd.DataFrame) -> pd.DataFrame:
+    estados = enc[enc["cve_ent"] != NACIONAL][["anio", "id_indicador", "cve_ent", "estimacion"]]
+    v = valor[valor["cve_ent"] != NACIONAL].melt(
+        id_vars=["anio", "cve_ent"], value_vars=["participacion_51", "participacion_51_no_minero"],
+        var_name="id_indicador", value_name="estimacion").dropna()
+    v["id_indicador"] = v["id_indicador"].map({"participacion_51": "vab51_participacion",
+                                               "participacion_51_no_minero": "vab51_participacion_no_minero"})
+    r = pd.concat([estados, v], ignore_index=True)
+    r["rango"] = r.groupby(["anio", "id_indicador"])["estimacion"].rank(ascending=False, method="min").astype(int)
+    r["n_entidades"] = r.groupby(["anio", "id_indicador"])["cve_ent"].transform("count")
+    exigir((r["n_entidades"] == 32).all(), "ranking: algún año × indicador no tiene las 32 entidades")
+    return r
+
+
+def validacion_oecd(enc_todo: pd.DataFrame, oecd: pd.DataFrame) -> pd.DataFrame:
+    nac = enc_todo[enc_todo["cve_ent"] == NACIONAL].set_index(["anio", "id_indicador", "grupo_edad"])
     filas = []
-    for indicador in INDICADORES_MORAN:
-        m = Moran_Local(df[indicador].to_numpy(), w, permutations=PERMUTACIONES, seed=SEMILLA)
-        for cvegeo, ii, p, q in zip(df["cvegeo"], m.Is, m.p_sim, m.q):
-            cuadrante = CUADRANTES[q] if p < ALFA else "no significativo"
-            filas.append((anio, indicador, cvegeo, float(ii), float(p), cuadrante))
-    return filas
-
-
-def moran_bivariado(df: pd.DataFrame, w: W, anio: int) -> list:
-    filas = []
-    for x, y in MORAN_BIVARIADO:
-        np.random.seed(SEMILLA)  # esda.Moran_BV usa el generador global de numpy
-        m = Moran_BV(df[x].to_numpy(), df[y].to_numpy(), w, permutations=PERMUTACIONES)
-        filas.append((anio, x, y, m.I, m.z_sim, m.p_sim))
-    return filas
+    for r in oecd[oecd["cod_pais"] == "MEX"].itertuples():
+        if r.medida not in VALIDACION_OECD:
+            continue
+        ind, grupo = VALIDACION_OECD[r.medida]
+        if (r.anio, ind, grupo) not in nac.index:
+            continue
+        e = nac.loc[(r.anio, ind, grupo)]
+        filas.append((r.anio, r.medida, ind, r.valor, e["estimacion"], e["li_90"], e["ls_90"],
+                      e["estimacion"] - r.valor, e["li_90"] <= r.valor <= e["ls_90"]))
+    df = pd.DataFrame(filas, columns=["anio", "medida_oecd", "id_indicador", "valor_oecd", "valor_endutih",
+                                      "li_90", "ls_90", "diferencia_pp", "dentro_ic"])
+    exigir(not df.empty, "validación OECD: no hay años en común")
+    return df
 
 
 # --------------------------------------------------------------------------
 # Carga
 # --------------------------------------------------------------------------
 def cargar_resultados(engine, resultados: dict, run_id: str, fecha_carga: datetime) -> None:
-    # DECISIÓN HUMANA (temporal): TRUNCATE + INSERT en cada ejecución.
-    # Se eligió así mientras se valida si es correcto recargar todo; si resulta
-    # que no se debe hacer (p. ej. se necesita historial), se busca otra estrategia.
-    # Todo corre en una transacción: si algo falla, gold queda como estaba.
+    # DECISIÓN HUMANA (temporal): TRUNCATE + INSERT en cada ejecución, en una transacción.
     log = []
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {', '.join(f'{SCHEMA}.{t}' for t in TABLAS)}"))
@@ -152,37 +175,20 @@ def main() -> None:
     fecha_carga = datetime.now(timezone.utc)
     print(f"run_id: {run_id}")
 
-    columnas = sorted({c for par in CORRELACIONES + MORAN_BIVARIADO for c in par} | set(INDICADORES_MORAN))
-    kpi = pd.read_sql(f"SELECT anio, cvegeo, {', '.join(columnas)} FROM gold.kpi_municipio_anio", engine)
-    kpi["cvegeo"] = kpi["cvegeo"].str.strip()
-    exigir(sorted(kpi["anio"].unique()) == list(ANIOS_PANEL),
-           f"kpi_municipio_anio: años {sorted(kpi['anio'].unique())}, se esperaban {list(ANIOS_PANEL)}")
-
-    cvegeos = sorted(kpi["cvegeo"].unique())
-    w = construir_pesos(engine, cvegeos)
+    enc_todo = pd.read_sql("SELECT * FROM gold.fact_encuesta_tic", engine)
+    enc_todo["cve_ent"] = enc_todo["cve_ent"].str.strip()
+    enc = enc_todo[enc_todo["grupo_edad"] == "total"]
+    valor = pd.read_sql("SELECT anio, cve_ent, participacion_51, participacion_51_no_minero "
+                        "FROM gold.valor_entidad_anio", engine)
+    valor["cve_ent"] = valor["cve_ent"].str.strip()
+    oecd = pd.read_sql("SELECT anio, cod_pais, medida, valor FROM gold.fact_oecd_tic", engine)
 
     # Fail-fast: cualquier excepción detiene el script (no se atrapa a propósito).
-    filas = {t: [] for t in TABLAS}
-    for anio in ANIOS_PANEL:
-        df = kpi[kpi["anio"] == anio].set_index("cvegeo").loc[cvegeos].reset_index()
-        nulos = df[INDICADORES_MORAN].isna().any(axis=1)
-        exigir(not nulos.any(), f"{anio}: indicadores nulos en {df.loc[nulos, 'cvegeo'].tolist()}")
-
-        filas["resultado_correlacion"] += correlaciones(df, anio)
-        filas["resultado_moran_global"] += moran_global(df, w, anio)
-        filas["resultado_lisa"] += lisa(df, w, anio)
-        filas["resultado_moran_bivariado"] += moran_bivariado(df, w, anio)
-        print(f"     {anio}: análisis completado")
-
     resultados = {
-        "resultado_correlacion": pd.DataFrame(filas["resultado_correlacion"], columns=[
-            "anio", "variable_x", "variable_y", "metodo", "coeficiente", "p_value", "n"]),
-        "resultado_moran_global": pd.DataFrame(filas["resultado_moran_global"], columns=[
-            "anio", "indicador", "i", "esperanza_i", "z", "p_sim"]),
-        "resultado_lisa": pd.DataFrame(filas["resultado_lisa"], columns=[
-            "anio", "indicador", "cvegeo", "ii", "p_sim", "cuadrante"]),
-        "resultado_moran_bivariado": pd.DataFrame(filas["resultado_moran_bivariado"], columns=[
-            "anio", "variable_x", "variable_y", "i", "z", "p_sim"]),
+        "resultado_brecha": brechas(enc),
+        "resultado_tendencia": tendencias(enc),
+        "resultado_ranking": rankings(enc, valor),
+        "resultado_validacion_oecd": validacion_oecd(enc_todo, oecd),
     }
     cargar_resultados(engine, resultados, run_id, fecha_carga)
 

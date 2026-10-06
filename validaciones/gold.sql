@@ -1,189 +1,72 @@
--- Consultas de validación de la capa gold: cada KPI requerido se calcula directamente
--- desde las tablas de hechos y dimensiones (sin usar la vista gold.kpi_municipio_anio),
--- para demostrar que el warehouse conserva la información necesaria.
+-- Consultas de validación de la capa gold. Cada indicador se recalcula directamente desde silver
+-- o desde los hechos (sin las vistas) para demostrar que el warehouse reproduce las cifras.
 -- Correr con:
---   docker exec -i yucatan_dw psql -U admin -d yucatan_dw < validaciones/gold.sql
--- Solo lectura (SELECT). Las consultas por municipio muestran 10 filas (en general, los
--- valores más altos del KPI); quitar el LIMIT para ver los 106.
+--   docker exec -i ed_dw psql -U admin -d economia_digital_dw < validaciones/gold.sql
 
--- Año a consultar y edición DENUE que le corresponde (noviembre de cada año; 2025 usa 2025_05).
 \set anio 2024
-\set edicion '\'2024_11\''
 
--- ==========================================================================
--- KPIs demográficos (fact_censo × dim_municipio, Censo 2020)
--- ==========================================================================
-
--- 1. Población total
-SELECT m.nombre, c.pobtot AS poblacion_total
-FROM gold.fact_censo c
-JOIN gold.dim_municipio m USING (cvegeo)
-ORDER BY poblacion_total DESC
-LIMIT 10;
-
--- 2. Densidad poblacional (hab/km²) = pobtot / área
-SELECT m.nombre, c.pobtot, round(m.area_km2::NUMERIC, 2) AS area_km2,
-       round((c.pobtot / m.area_km2)::NUMERIC, 2) AS densidad_poblacional
-FROM gold.fact_censo c
-JOIN gold.dim_municipio m USING (cvegeo)
-ORDER BY densidad_poblacional DESC
-LIMIT 10;
-
--- 3. Tasa de población económicamente activa = pea / población de 12 años y más
-SELECT m.nombre, c.pea, c.p_12ymas,
-       round(c.pea::NUMERIC / NULLIF(c.p_12ymas, 0), 4) AS tasa_pea
-FROM gold.fact_censo c
-JOIN gold.dim_municipio m USING (cvegeo)
-ORDER BY tasa_pea DESC NULLS LAST
-LIMIT 10;
-
--- 4. Población por grupo de edad (conteos y proporción sobre pobtot)
-SELECT m.nombre, c.pob0_14, c.pob15_64, c.pob65_mas,
-       round(c.pob0_14::NUMERIC   / NULLIF(c.pobtot, 0), 4) AS prop_0_14,
-       round(c.pob15_64::NUMERIC  / NULLIF(c.pobtot, 0), 4) AS prop_15_64,
-       round(c.pob65_mas::NUMERIC / NULLIF(c.pobtot, 0), 4) AS prop_65_mas
-FROM gold.fact_censo c
-JOIN gold.dim_municipio m USING (cvegeo)
-ORDER BY prop_65_mas DESC NULLS LAST
-LIMIT 10;
-
--- ==========================================================================
--- KPIs económicos (fact_establecimiento × dim_actividad × dim_municipio)
--- fact_establecimiento NO se suma entre ediciones: siempre se filtra una sola.
--- ==========================================================================
-
--- 5. Total de negocios
-SELECT m.nombre, count(*) AS total_negocios
-FROM gold.fact_establecimiento f
-JOIN gold.dim_municipio m USING (cvegeo)
-WHERE f.edicion = :edicion
-GROUP BY m.nombre
-ORDER BY total_negocios DESC
-LIMIT 10;
-
--- 6. Densidad de negocios (negocios/km²)
-SELECT m.nombre, count(*) AS total_negocios,
-       round((count(*) / m.area_km2)::NUMERIC, 2) AS densidad_negocios
-FROM gold.fact_establecimiento f
-JOIN gold.dim_municipio m USING (cvegeo)
-WHERE f.edicion = :edicion
-GROUP BY m.nombre, m.area_km2
-ORDER BY densidad_negocios DESC
-LIMIT 10;
-
--- 7. Negocios por 1,000 habitantes
-SELECT m.nombre, count(*) AS total_negocios, c.pobtot,
-       round(1000.0 * count(*) / NULLIF(c.pobtot, 0), 2) AS negocios_por_1000_hab
-FROM gold.fact_establecimiento f
-JOIN gold.dim_municipio m USING (cvegeo)
-JOIN gold.fact_censo c USING (cvegeo)
-WHERE f.edicion = :edicion
-GROUP BY m.nombre, c.pobtot
-ORDER BY negocios_por_1000_hab DESC
-LIMIT 10;
-
--- 8. Densidad retail (sector 46, negocios/km²)
-SELECT m.nombre, count(*) AS negocios_retail,
-       round((count(*) / m.area_km2)::NUMERIC, 2) AS densidad_retail
-FROM gold.fact_establecimiento f
-JOIN gold.dim_actividad a USING (id_actividad)
-JOIN gold.dim_municipio m USING (cvegeo)
-WHERE f.edicion = :edicion AND a.es_retail
-GROUP BY m.nombre, m.area_km2
-ORDER BY densidad_retail DESC
-LIMIT 10;
-
--- 9. Densidad de servicios (sectores 51 a 81, negocios/km²)
-SELECT m.nombre, count(*) AS negocios_servicio,
-       round((count(*) / m.area_km2)::NUMERIC, 2) AS densidad_servicios
-FROM gold.fact_establecimiento f
-JOIN gold.dim_actividad a USING (id_actividad)
-JOIN gold.dim_municipio m USING (cvegeo)
-WHERE f.edicion = :edicion AND a.es_servicio
-GROUP BY m.nombre, m.area_km2
-ORDER BY densidad_servicios DESC
-LIMIT 10;
-
--- 10. Actividad económica dominante: sector con más negocios (empate -> código de sector menor)
-SELECT DISTINCT ON (m.nombre)
-       m.nombre, a.codigo_sector, a.desc_sector, count(*) AS negocios_sector
-FROM gold.fact_establecimiento f
-JOIN gold.dim_actividad a USING (id_actividad)
-JOIN gold.dim_municipio m USING (cvegeo)
-WHERE f.edicion = :edicion
-GROUP BY m.nombre, a.codigo_sector, a.desc_sector
-ORDER BY m.nombre, negocios_sector DESC, a.codigo_sector
-LIMIT 10;
-
--- ==========================================================================
--- KPIs de seguridad (fact_incidencia × dim_tiempo × dim_delito × dim_municipio)
--- ==========================================================================
-
--- 11. Total de incidentes en el año
-SELECT m.nombre, sum(i.incidentes) AS total_incidentes
-FROM gold.fact_incidencia i
-JOIN gold.dim_tiempo t USING (id_tiempo)
-JOIN gold.dim_municipio m USING (cvegeo)
-WHERE t.anio = :anio
-GROUP BY m.nombre
-ORDER BY total_incidentes DESC
-LIMIT 10;
-
--- 12. Tasa delictiva por 1,000 habitantes
-SELECT m.nombre, sum(i.incidentes) AS total_incidentes, c.pobtot,
-       round(1000.0 * sum(i.incidentes) / NULLIF(c.pobtot, 0), 2) AS tasa_delictiva_1000_hab
-FROM gold.fact_incidencia i
-JOIN gold.dim_tiempo t USING (id_tiempo)
-JOIN gold.dim_municipio m USING (cvegeo)
-JOIN gold.fact_censo c USING (cvegeo)
-WHERE t.anio = :anio
-GROUP BY m.nombre, c.pobtot
-ORDER BY tasa_delictiva_1000_hab DESC
-LIMIT 10;
-
--- 13a. Incidentes por tipo de delito en el año (todo el estado)
-SELECT d.tipo_delito, sum(i.incidentes) AS incidentes
-FROM gold.fact_incidencia i
-JOIN gold.dim_tiempo t USING (id_tiempo)
-JOIN gold.dim_delito d USING (id_delito)
-WHERE t.anio = :anio
-GROUP BY d.tipo_delito
-ORDER BY incidentes DESC
-LIMIT 10;
-
--- 13b. Incidentes por mes en el año (todo el estado)
-SELECT t.mes, t.nombre_mes, sum(i.incidentes) AS incidentes
-FROM gold.fact_incidencia i
-JOIN gold.dim_tiempo t USING (id_tiempo)
-WHERE t.anio = :anio
-GROUP BY t.mes, t.nombre_mes
-ORDER BY t.mes;
-
--- 13c. Incidentes por año, 2020 a 2025 (todo el estado)
-SELECT t.anio, sum(i.incidentes) AS incidentes
-FROM gold.fact_incidencia i
-JOIN gold.dim_tiempo t USING (id_tiempo)
-GROUP BY t.anio
-ORDER BY t.anio;
-
--- 14. Crimen relativo a la actividad económica = 100 × incidentes / negocios
-WITH crimen AS (
-    SELECT i.cvegeo, sum(i.incidentes) AS total_incidentes
-    FROM gold.fact_incidencia i
-    JOIN gold.dim_tiempo t USING (id_tiempo)
-    WHERE t.anio = :anio
-    GROUP BY i.cvegeo
-),
-negocios AS (
-    SELECT cvegeo, count(*) AS total_negocios
-    FROM gold.fact_establecimiento
-    WHERE edicion = :edicion
-    GROUP BY cvegeo
+-- 1. Proporciones ponderadas recalculadas desde silver vs gold (diferencia debe ser ~0)
+WITH silver_h AS (
+    SELECT cve_ent, 100.0 * sum(fac_hog) FILTER (WHERE tiene_internet) / sum(fac_hog) AS hog_internet,
+           100.0 * sum(fac_hog) FILTER (WHERE tiene_computadora) / sum(fac_hog) AS hog_computadora
+    FROM silver.endutih_hogar WHERE anio = :anio AND cve_ent IN ('27', '31') GROUP BY cve_ent
+    UNION ALL
+    SELECT '00', 100.0 * sum(fac_hog) FILTER (WHERE tiene_internet) / sum(fac_hog),
+           100.0 * sum(fac_hog) FILTER (WHERE tiene_computadora) / sum(fac_hog)
+    FROM silver.endutih_hogar WHERE anio = :anio
 )
-SELECT m.nombre, cr.total_incidentes, n.total_negocios,
-       round(100.0 * cr.total_incidentes / NULLIF(n.total_negocios, 0), 2) AS incidentes_por_100_negocios
-FROM gold.dim_municipio m
-JOIN crimen cr USING (cvegeo)
-JOIN negocios n USING (cvegeo)
-ORDER BY incidentes_por_100_negocios DESC NULLS LAST
-LIMIT 10;
+SELECT s.cve_ent,
+       round(s.hog_internet::NUMERIC, 3) AS silver_hog_internet,
+       round(g1.estimacion::NUMERIC, 3) AS gold_hog_internet,
+       round(s.hog_computadora::NUMERIC, 3) AS silver_hog_computadora,
+       round(g2.estimacion::NUMERIC, 3) AS gold_hog_computadora
+FROM silver_h s
+JOIN gold.fact_encuesta_tic g1 ON g1.cve_ent = s.cve_ent AND g1.anio = :anio AND g1.id_indicador = 'hog_internet' AND g1.grupo_edad = 'total'
+JOIN gold.fact_encuesta_tic g2 ON g2.cve_ent = s.cve_ent AND g2.anio = :anio AND g2.id_indicador = 'hog_computadora' AND g2.grupo_edad = 'total'
+ORDER BY s.cve_ent;
+
+-- 2. Indicador condicional: compran por internet / usuarios de internet
+SELECT cve_ent,
+       round((100.0 * sum(fac_per) FILTER (WHERE compra_internet) / sum(fac_per))::NUMERIC, 3) AS usu_compra_silver
+FROM silver.endutih_persona WHERE anio = :anio AND usa_internet AND cve_ent IN ('27', '31')
+GROUP BY cve_ent ORDER BY cve_ent;
+
+SELECT cve_ent, round(estimacion::NUMERIC, 3) AS usu_compra_gold, round(error_estandar::NUMERIC, 3) AS ee, calidad
+FROM gold.fact_encuesta_tic
+WHERE anio = :anio AND id_indicador = 'usu_compra' AND grupo_edad = 'total' AND cve_ent IN ('27', '31')
+ORDER BY cve_ent;
+
+-- 3. Panel de las tres entidades foco (vista kpi_entidad_anio)
+SELECT anio, nombre, round(hog_internet::NUMERIC, 1) AS hog_internet, round(pob_internet::NUMERIC, 1) AS pob_internet,
+       round(usu_compra::NUMERIC, 1) AS usu_compra, round(usu_vende::NUMERIC, 1) AS usu_vende,
+       round(participacion_51_no_minero::NUMERIC, 2) AS sector51_no_minero
+FROM gold.kpi_entidad_anio WHERE es_foco ORDER BY nombre, anio;
+
+-- 4. Valor: peso del sector 51 recalculado desde el hecho
+SELECT v.anio, v.cve_ent,
+       round((100 * v51.valor_mdp / vt.valor_mdp)::NUMERIC, 3) AS desde_hechos,
+       round(v.participacion_51::NUMERIC, 3) AS vista
+FROM gold.valor_entidad_anio v
+JOIN gold.fact_valor_entidad v51 ON v51.anio = v.anio AND v51.cve_ent = v.cve_ent AND v51.concepto = 'vab_51' AND v51.precios = 'corrientes'
+JOIN gold.fact_valor_entidad vt  ON vt.anio = v.anio AND vt.cve_ent = v.cve_ent AND vt.concepto = 'vab_total' AND vt.precios = 'corrientes'
+WHERE v.es_foco AND v.anio >= 2020 ORDER BY v.cve_ent, v.anio;
+
+-- 5. Brechas significativas en el año (Yucatán vs Tabasco y vs nacional)
+SELECT b.id_indicador, b.entidad_a, b.entidad_b, round(b.diferencia_pp::NUMERIC, 1) AS dif_pp,
+       round(b.p_value::NUMERIC, 4) AS p
+FROM gold.resultado_brecha b WHERE b.anio = :anio AND b.significativa ORDER BY abs(b.diferencia_pp) DESC;
+
+-- 6. Validación externa: ENDUTIH vs OECD
+SELECT medida_oecd, count(*) AS anios, round(max(abs(diferencia_pp))::NUMERIC, 3) AS max_dif_pp,
+       bool_and(dentro_ic) AS siempre_dentro_ic
+FROM gold.resultado_validacion_oecd GROUP BY medida_oecd ORDER BY medida_oecd;
+
+-- 7. Integridad referencial de los hechos (todas deben dar 0)
+SELECT 'fact_encuesta_tic sin entidad' AS regla, count(*) FROM gold.fact_encuesta_tic f
+LEFT JOIN gold.dim_entidad e USING (cve_ent) WHERE e.cve_ent IS NULL
+UNION ALL
+SELECT 'fact_encuesta_tic sin indicador', count(*) FROM gold.fact_encuesta_tic f
+LEFT JOIN gold.dim_indicador i USING (id_indicador) WHERE i.id_indicador IS NULL
+UNION ALL
+SELECT 'fact_oecd_tic sin país', count(*) FROM gold.fact_oecd_tic f
+LEFT JOIN gold.dim_pais p USING (cod_pais) WHERE p.cod_pais IS NULL;
